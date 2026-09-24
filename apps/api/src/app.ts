@@ -9,12 +9,16 @@ import type { DatabaseSync } from 'node:sqlite';
 import type { AppConfig } from './config';
 import { registerHealthRoutes } from './routes/health';
 import { registerTaskRoutes } from './routes/tasks';
+import { createDefaultToolRegistry } from './tools';
+import { DemoModel } from './runner/model';
+import type { RunnerDeps } from './runner/runTask';
+import { AppError } from './services/errors';
 
 const pkgRoot = path.resolve(fileURLToPath(new URL('.', import.meta.url)), '..');
 const webDist = path.resolve(pkgRoot, '../../apps/web/dist');
 
 /**
- * 组装 API 服务：路由只做校验与响应；任务服务、运行器、存储分层在 P1 落地。
+ * 组装 API 服务：路由只做校验与响应；任务服务管状态与事务，运行器管模型与工具循环。
  * 独立于 listen，便于测试用 inject() 直接调用。
  */
 export async function buildServer(
@@ -27,8 +31,16 @@ export async function buildServer(
     genReqId: () => randomUUID(), // requestId 贯穿日志与错误响应
   });
 
+  const runner: RunnerDeps = {
+    db,
+    registry: createDefaultToolRegistry(),
+    model: new DemoModel(),
+    maxSteps: config.maxSteps,
+    stepTimeoutMs: config.stepTimeoutMs,
+  };
+
   registerHealthRoutes(app, db);
-  registerTaskRoutes(app);
+  registerTaskRoutes(app, runner);
 
   app.setNotFoundHandler((request, reply) => {
     reply.code(404).send({
@@ -36,7 +48,14 @@ export async function buildServer(
     });
   });
 
-  app.setErrorHandler((error: FastifyError, request, reply) => {
+  app.setErrorHandler((error: FastifyError | AppError, request, reply) => {
+    // 服务层业务错误：使用自带的状态码与机器可读 code
+    if (error instanceof AppError) {
+      reply.status(error.statusCode).send({
+        error: { code: error.code, message: error.message, requestId: request.id },
+      });
+      return;
+    }
     const status = error.statusCode ?? 500;
     request.log.warn({ err: error, status }, 'request failed'); // 详情只进日志，不返回客户端
     reply.status(status).send({

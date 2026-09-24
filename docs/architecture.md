@@ -15,8 +15,12 @@
         packages/contracts ── 前后端共用的领域类型、状态规则、事件与错误契约
 ```
 
-- **apps/web**：React + TypeScript + Vite。P0 为应用壳与 API 连通状态；P1/P2 加入任务列表、详情与实时步骤。
-- **apps/api**：Fastify + TypeScript。路由层只做校验与响应；后续分层为：任务服务（状态与事务）→ 运行器（模型与工具循环）→ 存储层（SQLite）。P0 已建好模块边界，P1 接通。
+- **apps/web**：React + TypeScript + Vite。当前为应用壳与 API 连通状态；任务列表、详情与实时步骤在 P2 加入。
+- **apps/api**：Fastify + TypeScript。分层已落地：
+  - `routes/` 只做输入校验与响应组装，不触碰数据库细节；
+  - `services/taskService` 是唯一读写 `tasks` / `task_events` 的模块，状态机校验与「状态更新 + 事件追加同事务」的不变量在此强制执行；
+  - `runner/`（runTask + 模型适配层）驱动 模型 → 工具 循环，受 `MAX_STEPS` 与 `STEP_TIMEOUT_MS` 约束，异常兜底为任务终态而非悬挂；
+  - `tools/` 为白名单工具注册表（参数校验、拒绝未声明参数），默认工具仅纯计算（`calculate`、`text_stats`）。
 - **packages/contracts**：前后端共享的数据契约（任务、事件、工具、错误格式），单一事实来源。
 
 ## 运行方式

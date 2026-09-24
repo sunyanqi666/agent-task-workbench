@@ -141,18 +141,12 @@ main {
   color: #6b7280;
 }
 
-.phases {
-  margin: 0;
-  padding-left: 20px;
-  color: var(--muted);
-  font-size: 14px;
-  display: grid;
-  gap: 6px;
-}
-
-.phases .done {
+.empty code {
+  background: #f3f4f6;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 13px;
   color: var(--accent);
-  font-weight: 600;
 }
 
 .footer {

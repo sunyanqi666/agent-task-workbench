@@ -130,3 +130,28 @@ export interface HealthInfo {
   version: string;
   uptimeSec: number;
 }
+
+// ===== 任务 API 契约（P1） =====
+/** prompt 长度上限：服务端与前端共用 */
+export const PROMPT_MAX_LENGTH = 8000;
+
+/** POST /api/v1/tasks 请求体 */
+export interface CreateTaskInput {
+  /** 非空，去除首尾空白后 1..PROMPT_MAX_LENGTH 字符 */
+  prompt: string;
+  /** 缺省为 demo；live 在 P3 接入 */
+  mode?: ModelMode;
+}
+
+/** GET /api/v1/tasks 响应：按创建时间倒序分页 */
+export interface TaskListResponse {
+  items: Task[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+/** GET /api/v1/tasks/:id/events 响应：按 seq 升序 */
+export interface TaskEventsResponse {
+  events: TaskEvent[];
+}

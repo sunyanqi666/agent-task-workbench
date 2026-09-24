@@ -46,20 +46,11 @@ export default function App() {
         <section className="card">
           <h2>说明</h2>
           <p className="empty">
-            当前为 P0 项目骨架：前后端、数据契约、数据库迁移与健康检查已就绪。
-            任务创建、Agent 执行与实时步骤将在 P1 / P2 提供。
+            任务执行引擎已就绪：调用 <code>POST /api/v1/tasks</code> 创建任务，
+            后端将执行模拟模型与受限工具调用，全部事件持久化到 SQLite，
+            可通过 <code>GET /api/v1/tasks/:id/events</code> 回放。
+            实时界面将在 P2 提供。
           </p>
-        </section>
-
-        <section className="card">
-          <h2>项目阶段</h2>
-          <ol className="phases">
-            <li className="done">P0 项目骨架（当前）</li>
-            <li>P1 可运行任务：状态机、模拟模型、工具调用</li>
-            <li>P2 实时界面：SSE 步骤流与回放</li>
-            <li>P3 真实模型接入与取消 / 重试 / 超时</li>
-            <li>P4 工程化与作品集交付</li>
-          </ol>
         </section>
       </main>
 
