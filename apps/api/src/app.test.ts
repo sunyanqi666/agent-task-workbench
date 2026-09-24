@@ -69,7 +69,7 @@ test('端到端：创建表达式任务 → 异步执行 → 完整事件回放'
   assert.deepEqual(inc.map((e) => e.seq), [6, 7]);
 });
 
-test('demo 确定性：相同 prompt 产生相同的事件序列（忽略时间戳）', async (t) => {
+test('demo 确定性：相同 prompt 产生相同的事件序列（忽略时间戳与耗时）', async (t) => {
   const { app, cleanup } = await makeApp();
   t.after(cleanup);
 
@@ -85,11 +85,15 @@ test('demo 确定性：相同 prompt 产生相同的事件序列（忽略时间�
     return (eventsRes.json() as { events: TaskEvent[] }).events;
   };
 
+  // 剥离 durationMs：工具执行耗时是环境相关的毫秒数，不属于确定性契约
+  const normalize = (e: TaskEvent) => {
+    const payload = { ...(e.payload as Record<string, unknown>) };
+    delete payload.durationMs;
+    return [e.seq, e.type, payload];
+  };
+
   const [a, b] = await Promise.all([runOnce(), runOnce()]);
-  assert.deepEqual(
-    a.map((e) => [e.seq, e.type, e.payload]),
-    b.map((e) => [e.seq, e.type, e.payload]),
-  );
+  assert.deepEqual(a.map(normalize), b.map(normalize));
 });
 
 test('任务列表：按创建时间倒序分页', async (t) => {
