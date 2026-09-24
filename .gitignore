@@ -1,2 +1,13 @@
-# Local project plan and development handoff notes
+# 内部项目计划与交接记录（仅本地维护，不上传 GitHub）
 /PROJECT.md
+
+# 依赖与构建产物
+node_modules/
+dist/
+
+# 本地环境配置与数据
+.env
+data/
+
+# 系统文件
+.DS_Store

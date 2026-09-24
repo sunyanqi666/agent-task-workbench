@@ -1,0 +1,7 @@
+packages:
+  - 'apps/*'
+  - 'packages/*'
+
+# 允许执行安装脚本的依赖（esbuild 为 vite 所需的二进制下载）
+allowBuilds:
+  esbuild: true

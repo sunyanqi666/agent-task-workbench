@@ -1,0 +1,25 @@
+{
+  "name": "agent-task-workbench",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AI 任务工作台：可观察的 Agent 任务执行链路（作品集项目）",
+  "type": "module",
+  "packageManager": "pnpm@12.6.0",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "dev": "bash scripts/dev.sh",
+    "dev:api": "pnpm -C apps/api dev",
+    "dev:web": "pnpm -C apps/web dev",
+    "start": "pnpm -C apps/api start",
+    "build": "pnpm -C apps/web build",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "eslint .",
+    "test": "pnpm -C apps/api test"
+  },
+  "devDependencies": {
+    "eslint": "^9.20.0",
+    "typescript-eslint": "^8.30.0"
+  }
+}
