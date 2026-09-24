@@ -14,7 +14,14 @@ export interface ModelUsage {
 
 export type ModelAction =
   | { kind: 'output'; text: string; usage?: ModelUsage }
-  | { kind: 'tool_call'; name: string; input: Record<string, unknown>; usage?: ModelUsage }
+  | {
+      kind: 'tool_call';
+      name: string;
+      input: Record<string, unknown>;
+      usage?: ModelUsage;
+      /** 推理模式返回的思维链：带工具调用的轮次必须在后续请求中传回（DeepSeek 要求，缺失返回 400） */
+      reasoning?: string;
+    }
   | { kind: 'finish'; summary: string; usage?: ModelUsage };
 
 /** 已执行步骤的记录：模型据此决定下一步；toolResult 仅在 tool_call 后存在 */

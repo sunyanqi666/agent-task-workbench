@@ -74,16 +74,18 @@ curl -X POST "http://localhost:3000/api/v1/tasks/<id>/retry"
 
 ### live 模式（真实模型，P3）
 
-- 环境变量：`MODEL_PROVIDER=deepseek` 与 `MODEL_API_KEY` 必填；`MODEL_BASE_URL`（默认 `https://api.deepseek.com`）、`MODEL_NAME`（默认 `deepseek-chat`，仅作未选模型时的回退）可选。密钥仅服务端读取，不进入事件与日志。
+- 环境变量：`MODEL_PROVIDER=deepseek` 与 `MODEL_API_KEY` 必填；`MODEL_BASE_URL`（默认 `https://api.deepseek.com`）、`MODEL_NAME`（默认 `deepseek-flash`，仅作未选模型时的回退）可选。密钥仅服务端读取，不进入事件与日志。
 - 未配置时创建或重试 live 任务返回 503（`live_model_not_configured`），不返回假成功。
 - 适配器走 OpenAI 兼容 chat completions：每次步进重建消息序列（system + prompt + 历史输出 / 工具调用与结果），携带白名单工具声明；模型返回工具调用则继续循环，返回纯文本即视为最终总结（finish）。
 - 每次模型调用与工具执行共用 `STEP_TIMEOUT_MS` 步超时预算，且可被取消信号中止。
 
 ### 模型选择与用量（P4）
 
-- **受控目录**：`GET /api/v1/models` 返回服务端允许的模型（当前为 `deepseek-chat` / `deepseek-reasoner`）。前端只能提交目录中的 `modelId`，非法值返回 400；缺省为 `deepseek-chat`。
+- **受控目录**：`GET /api/v1/models` 返回服务端允许的模型（当前为 `deepseek-flash` / `deepseek-v4-pro`；旧名 `deepseek-chat` / `deepseek-reasoner` 已于 2026-07-24 被供应商停用，提交将返回 400，历史任务经迁移 003 映射到现行名称）。前端只能提交目录中的 `modelId`，非法值返回 400；缺省为 `deepseek-flash`。
 - **固化选择**：创建任务时 `modelId` 写入任务行（`tasks.model_id`），重试生成的新任务沿用原任务选择；live 适配器按任务所选模型发起请求（未指定回退全局 `MODEL_NAME`）。
 - **用量记录**：live 模型每次响应中供应商返回的 `usage`（`prompt_tokens` / `completion_tokens`）累加到任务行（`tasks.prompt_tokens` / `tasks.completion_tokens`），任务快照以 `usage: { promptTokens, completionTokens }` 返回；demo 任务恒为 0。用量是任务行事实而非过程事件，不进入事件流。
+- **推理模式**：两个模型均默认开启思考模式，响应含 `reasoning_content`（思维链）。带工具调用的轮次，适配器会把思维链在后续所有请求中随 assistant 消息传回（DeepSeek 要求，缺失返回 400）；无工具调用的轮次不传回（API 会忽略）。
+- **已知限制**：一次响应含多个 `tool_calls` 时仅执行第一个（以单个 tool_call 重建消息配对）；如真实任务频繁返回并行工具调用，再评估完整支持。
 - 账号、额度与费用控制（P5）建立在这条链路之上：当前 live 接口无用户隔离与费用限制，公开部署前必须补上。
 
 ## 任务状态机

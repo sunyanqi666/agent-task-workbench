@@ -12,7 +12,7 @@ export type ModelMode = 'demo' | 'live';
 
 // ===== 模型目录（P4：逐任务选模型的第一片） =====
 export interface ModelInfo {
-  /** 模型 id：创建任务时提交的受控标识（如 deepseek-chat） */
+  /** 模型 id：创建任务时提交的受控标识（如 deepseek-flash） */
   id: string;
   /** 展示名：前端直接渲染 */
   label: string;
@@ -21,10 +21,11 @@ export interface ModelInfo {
 /**
  * 服务端受控模型目录：前端只能提交目录中的 id，由 GET /api/v1/models 下发。
  * 当前为同一供应商（DeepSeek）的两个模型；多供应商适配在 P5 扩展。
+ * 注意：旧名 deepseek-chat / deepseek-reasoner 已于 2026-07-24 被供应商停用，不得回退。
  */
 export const AVAILABLE_MODELS: readonly ModelInfo[] = [
-  { id: 'deepseek-chat', label: 'DeepSeek Chat（通用）' },
-  { id: 'deepseek-reasoner', label: 'DeepSeek Reasoner（推理）' },
+  { id: 'deepseek-flash', label: 'DeepSeek Flash（通用 · 快）' },
+  { id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro（旗舰 · 强推理）' },
 ];
 
 /** 未指定 modelId 时的缺省模型 */

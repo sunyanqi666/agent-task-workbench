@@ -169,15 +169,15 @@ test('createTask 固化 modelId；recordModelUsage 逐次累加且不产生事�
   const { db, cleanup } = makeDb();
   t.after(cleanup);
 
-  const task = createTask(db, { prompt: 'x', mode: 'demo', modelId: 'deepseek-reasoner' });
-  assert.equal(task.modelId, 'deepseek-reasoner');
+  const task = createTask(db, { prompt: 'x', mode: 'demo', modelId: 'deepseek-v4-pro' });
+  assert.equal(task.modelId, 'deepseek-v4-pro');
   assert.deepEqual(task.usage, { promptTokens: 0, completionTokens: 0 });
 
   recordModelUsage(db, task.id, { promptTokens: 12, completionTokens: 3 });
   recordModelUsage(db, task.id, { promptTokens: 5, completionTokens: 4 });
   const updated = getTask(db, task.id);
   assert.deepEqual(updated.usage, { promptTokens: 17, completionTokens: 7 });
-  assert.equal(updated.modelId, 'deepseek-reasoner');
+  assert.equal(updated.modelId, 'deepseek-v4-pro');
   // 用量不是过程事件：不追加 task_events
   assert.equal(getEvents(db, task.id, 0).length, 1);
 });

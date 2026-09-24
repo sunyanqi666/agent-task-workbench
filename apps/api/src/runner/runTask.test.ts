@@ -196,14 +196,14 @@ test('模型选择与用量：nextStep 收到任务 modelId，usage 逐次累加
   const { deps, db, cleanup } = makeRunner({ model: scripted });
   t.after(cleanup);
 
-  const task = createTask(db, { prompt: 'x', mode: 'demo', modelId: 'deepseek-reasoner' });
+  const task = createTask(db, { prompt: 'x', mode: 'demo', modelId: 'deepseek-v4-pro' });
   await runTask(deps, task.id);
 
   const final = getTask(db, task.id);
   assert.equal(final.status, 'completed');
-  assert.equal(final.modelId, 'deepseek-reasoner');
+  assert.equal(final.modelId, 'deepseek-v4-pro');
   assert.deepEqual(final.usage, { promptTokens: 17, completionTokens: 7 }); // 10+2 步与 7+5 步累加
-  assert.deepEqual(receivedModelIds, ['deepseek-reasoner', 'deepseek-reasoner']);
+  assert.deepEqual(receivedModelIds, ['deepseek-v4-pro', 'deepseek-v4-pro']);
 });
 
 test('runTask 幂等：终态任务重复执行不产生新事件', async (t) => {

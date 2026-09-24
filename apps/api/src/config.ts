@@ -11,7 +11,7 @@ export interface AppConfig {
   modelApiKey: string | undefined;
   /** 真实模型 API 根地址（OpenAI 兼容 chat completions） */
   modelBaseUrl: string;
-  /** 真实模型名（如 deepseek-chat） */
+  /** 真实模型名（如 deepseek-flash）；仅作任务未指定模型时的回退值 */
   modelName: string;
   maxSteps: number;
   stepTimeoutMs: number;
@@ -66,7 +66,7 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     modelProvider: process.env.MODEL_PROVIDER ?? '',
     modelApiKey: process.env.MODEL_API_KEY,
     modelBaseUrl: stringEnv('MODEL_BASE_URL', 'https://api.deepseek.com'),
-    modelName: stringEnv('MODEL_NAME', 'deepseek-chat'),
+    modelName: stringEnv('MODEL_NAME', 'deepseek-flash'),
     maxSteps: intEnv('MAX_STEPS', 20),
     stepTimeoutMs: intEnv('STEP_TIMEOUT_MS', 60_000),
     demoStepDelayMs: intEnv('DEMO_STEP_DELAY_MS', 400),
