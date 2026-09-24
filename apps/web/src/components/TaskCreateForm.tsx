@@ -1,12 +1,33 @@
-import { useState, type FormEvent } from 'react';
-import { PROMPT_MAX_LENGTH } from 'contracts';
-import { createTask } from '../api';
+import { useEffect, useState, type FormEvent } from 'react';
+import type { ModelInfo } from 'contracts';
+import { DEFAULT_MODEL_ID, PROMPT_MAX_LENGTH } from 'contracts';
+import { createTask, fetchModels } from '../api';
 
-/** 创建任务表单：校验后提交，成功后跳转详情页实时观察执行过程 */
+/**
+ * 创建任务表单：选择模式（demo / live）与模型（服务端受控目录），校验后提交。
+ * live 模式需服务端配置模型密钥，未配置时服务端返回 503 并给出明确提示。
+ */
 export function TaskCreateForm({ onCreated }: { onCreated: (id: string) => void }) {
   const [prompt, setPrompt] = useState('');
+  const [mode, setMode] = useState<'demo' | 'live'>('demo');
+  const [modelId, setModelId] = useState(DEFAULT_MODEL_ID);
+  const [models, setModels] = useState<ModelInfo[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchModels()
+      .then(({ models }) => {
+        if (!cancelled) setModels(models);
+      })
+      .catch(() => {
+        // 目录拉取失败不阻塞表单：保留默认模型，创建时由服务端校验兜底
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -22,7 +43,11 @@ export function TaskCreateForm({ onCreated }: { onCreated: (id: string) => void 
     setSubmitting(true);
     setError(null);
     try {
-      const task = await createTask({ prompt: trimmed });
+      const task = await createTask({
+        prompt: trimmed,
+        mode,
+        ...(mode === 'live' ? { modelId } : {}), // demo 模式不绑定模型
+      });
       setPrompt('');
       onCreated(task.id);
     } catch (err) {
@@ -44,8 +69,33 @@ export function TaskCreateForm({ onCreated }: { onCreated: (id: string) => void 
           maxLength={PROMPT_MAX_LENGTH}
           disabled={submitting}
         />
+        <div className="form-row">
+          <select
+            value={mode}
+            onChange={(e) => setMode(e.target.value === 'live' ? 'live' : 'demo')}
+            disabled={submitting}
+            aria-label="执行模式"
+          >
+            <option value="demo">模式：demo（演示）</option>
+            <option value="live">模式：live（真实模型）</option>
+          </select>
+          <select
+            value={modelId}
+            onChange={(e) => setModelId(e.target.value)}
+            disabled={submitting || mode !== 'live' || models === null}
+            aria-label="模型"
+          >
+            {(models ?? [{ id: DEFAULT_MODEL_ID, label: DEFAULT_MODEL_ID }]).map((m) => (
+              <option key={m.id} value={m.id}>
+                模型：{m.label}
+              </option>
+            ))}
+          </select>
+        </div>
         <div className="form-footer">
-          <span className="hint">demo 模式 · 算式任务调用 calculate，其他调用 text_stats</span>
+          <span className="hint">
+            demo 模式无需密钥 · live 需服务端配置密钥并记录用量
+          </span>
           <button type="submit" disabled={submitting || prompt.trim().length === 0}>
             {submitting ? '创建中…' : '创建并执行'}
           </button>

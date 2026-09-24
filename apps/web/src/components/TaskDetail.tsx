@@ -69,6 +69,12 @@ export function TaskDetail({
                 setTask((prev) =>
                   prev ? { ...prev, status: statusOfTerminalEvent(event) } : prev,
                 );
+                // 终态后刷新快照：拿到最终用量与时间戳（usage 存任务行，不在事件里）
+                void fetchTask(id)
+                  .then((t) => {
+                    if (!cancelled) setTask(t);
+                  })
+                  .catch(() => undefined);
                 closeStream?.();
               }
             },
@@ -157,6 +163,12 @@ export function TaskDetail({
           </div>
           <div className="detail-meta">
             <span>模式：{task.mode}</span>
+            <span>模型：{task.modelId}</span>
+            {(task.usage.promptTokens > 0 || task.usage.completionTokens > 0) && (
+              <span>
+                用量：输入 {task.usage.promptTokens} / 输出 {task.usage.completionTokens} tokens
+              </span>
+            )}
             <span>创建：{new Date(task.createdAt).toLocaleString('zh-CN', { hour12: false })}</span>
             {running && <span className="live-indicator">实时接收事件中…</span>}
           </div>

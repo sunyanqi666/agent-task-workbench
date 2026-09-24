@@ -6,10 +6,16 @@ import { evaluateExpression } from '../tools';
  * demo 模型为确定性纯函数（相同 prompt 产生相同事件序列），P3 在此接口上接入真实模型。
  */
 
+/** 供应商单次响应返回的 token 用量；demo 模型无此信息 */
+export interface ModelUsage {
+  promptTokens: number;
+  completionTokens: number;
+}
+
 export type ModelAction =
-  | { kind: 'output'; text: string }
-  | { kind: 'tool_call'; name: string; input: Record<string, unknown> }
-  | { kind: 'finish'; summary: string };
+  | { kind: 'output'; text: string; usage?: ModelUsage }
+  | { kind: 'tool_call'; name: string; input: Record<string, unknown>; usage?: ModelUsage }
+  | { kind: 'finish'; summary: string; usage?: ModelUsage };
 
 /** 已执行步骤的记录：模型据此决定下一步；toolResult 仅在 tool_call 后存在 */
 export interface StepRecord {
@@ -22,8 +28,14 @@ export interface ModelAdapter {
    * 根据任务 prompt 与已执行历史决定下一步。
    * 实现必须保证可终止（最终返回 finish）或由运行器步数上限兜底。
    * signal：任务取消信号；长时间操作（如真实模型的 HTTP 调用）应及时中止。
+   * modelId：任务创建时选定的模型（受控目录 id）；demo 模型忽略，live 模型据此选模型。
    */
-  nextStep(prompt: string, history: readonly StepRecord[], signal?: AbortSignal): Promise<ModelAction>;
+  nextStep(
+    prompt: string,
+    history: readonly StepRecord[],
+    signal?: AbortSignal,
+    modelId?: string,
+  ): Promise<ModelAction>;
 }
 
 /** 从 prompt 中提取可求值的算术表达式片段；找不到或不可求值返回 null */

@@ -2,7 +2,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import type { TaskEventPayloads } from 'contracts';
 import type { ToolRegistry } from '../tools';
 import { validateToolInput } from '../tools';
-import { appendEvent, getTask, transitionTask } from '../services/taskService';
+import { appendEvent, getTask, recordModelUsage, transitionTask } from '../services/taskService';
 import type { ModelAction, ModelAdapter, StepRecord } from './model';
 import { registerCancel, unregisterCancel } from './cancelRegistry';
 
@@ -74,7 +74,7 @@ export async function runTask(deps: RunnerDeps, taskId: string): Promise<void> {
 
       let action: ModelAction;
       try {
-        action = await model.nextStep(task.prompt, history, controller.signal);
+        action = await model.nextStep(task.prompt, history, controller.signal, task.modelId);
       } catch (err) {
         if (controller.signal.aborted) {
           transitionTask(db, taskId, { to: 'canceled' });
@@ -86,7 +86,9 @@ export async function runTask(deps: RunnerDeps, taskId: string): Promise<void> {
           message: `模型调用失败：${errorMessage(err)}`,
         });
         return;
-      }
+    }
+      // 供应商返回的用量：真实发生的成本，取消前的响应也计入任务行
+      if (action.usage) recordModelUsage(db, taskId, action.usage);
       if (controller.signal.aborted) {
         // 模型返回后、写事件前被取消：事件不落库，直接转终态
         transitionTask(db, taskId, { to: 'canceled' });

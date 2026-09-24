@@ -8,6 +8,7 @@ import type { FastifyError, FastifyInstance } from 'fastify';
 import type { DatabaseSync } from 'node:sqlite';
 import type { AppConfig } from './config';
 import { registerHealthRoutes } from './routes/health';
+import { registerModelRoutes } from './routes/models';
 import { registerTaskRoutes } from './routes/tasks';
 import { createDefaultToolRegistry } from './tools';
 import { DemoModel } from './runner/model';
@@ -59,6 +60,7 @@ export async function buildServer(
   };
 
   registerHealthRoutes(app, db);
+  registerModelRoutes(app);
   registerTaskRoutes(app, runner);
 
   app.setNotFoundHandler((request, reply) => {

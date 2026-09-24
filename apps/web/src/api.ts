@@ -2,6 +2,7 @@ import type {
   ApiError,
   CreateTaskInput,
   HealthInfo,
+  ModelListResponse,
   Task,
   TaskEvent,
   TaskListResponse,
@@ -38,6 +39,11 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
 
 export async function fetchHealth(): Promise<HealthInfo> {
   return request<HealthInfo>('/api/v1/health');
+}
+
+/** 服务端受控模型目录：创建表单的下拉数据源 */
+export async function fetchModels(): Promise<ModelListResponse> {
+  return request<ModelListResponse>('/api/v1/models');
 }
 
 export async function createTask(input: CreateTaskInput): Promise<Task> {

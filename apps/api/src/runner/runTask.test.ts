@@ -182,6 +182,30 @@ test('live 任务未配置 liveModel → failed(model_error) 而非悬挂', asyn
   assert.ok((failedEvent.payload as { message: string }).message.includes('未配置'));
 });
 
+test('模型选择与用量：nextStep 收到任务 modelId，usage 逐次累加到任务行', async (t) => {
+  const receivedModelIds: Array<string | undefined> = [];
+  const scripted: ModelAdapter = {
+    async nextStep(_prompt, _history, _signal, modelId) {
+      receivedModelIds.push(modelId);
+      if (receivedModelIds.length === 1) {
+        return { kind: 'output', text: '先算一下', usage: { promptTokens: 10, completionTokens: 2 } };
+      }
+      return { kind: 'finish', summary: '完成', usage: { promptTokens: 7, completionTokens: 5 } };
+    },
+  };
+  const { deps, db, cleanup } = makeRunner({ model: scripted });
+  t.after(cleanup);
+
+  const task = createTask(db, { prompt: 'x', mode: 'demo', modelId: 'deepseek-reasoner' });
+  await runTask(deps, task.id);
+
+  const final = getTask(db, task.id);
+  assert.equal(final.status, 'completed');
+  assert.equal(final.modelId, 'deepseek-reasoner');
+  assert.deepEqual(final.usage, { promptTokens: 17, completionTokens: 7 }); // 10+2 步与 7+5 步累加
+  assert.deepEqual(receivedModelIds, ['deepseek-reasoner', 'deepseek-reasoner']);
+});
+
 test('runTask 幂等：终态任务重复执行不产生新事件', async (t) => {
   const { deps, db, cleanup } = makeRunner({
     model: scriptedModel([{ kind: 'finish', summary: '完成' }]),

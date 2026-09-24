@@ -23,6 +23,7 @@ interface ChatCompletionResponse {
       tool_calls?: { function: { name: string; arguments: string } }[];
     };
   }[];
+  usage?: { prompt_tokens?: number; completion_tokens?: number };
 }
 
 export interface LiveModelOptions {
@@ -49,6 +50,7 @@ export class LiveModel implements ModelAdapter {
     prompt: string,
     history: readonly StepRecord[],
     signal?: AbortSignal,
+    modelId?: string,
   ): Promise<ModelAction> {
     const { baseUrl, modelName, apiKey, registry, timeoutMs, fetchImpl } = this.options;
     const timeoutSignal = AbortSignal.timeout(timeoutMs);
@@ -61,7 +63,7 @@ export class LiveModel implements ModelAdapter {
         authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify({
-        model: modelName,
+        model: modelId ?? modelName, // 任务所选模型优先；未指定回退全局 MODEL_NAME
         messages: this.buildMessages(prompt, history),
         tools: registry.list().map((tool) => ({
           type: 'function',
@@ -82,8 +84,19 @@ export class LiveModel implements ModelAdapter {
       throw new Error(`模型服务返回 ${res.status}${detail ? `：${detail.slice(0, 200)}` : ''}`);
     }
 
-    const message = ((await res.json()) as ChatCompletionResponse).choices?.[0]?.message;
+    const data = (await res.json()) as ChatCompletionResponse;
+    const message = data.choices?.[0]?.message;
     if (!message) throw new Error('模型返回空响应');
+
+    // 供应商返回的用量（缺字段按 0 记；仅在出现 usage 对象时附加，保持无用量动作的形状不变）
+    const usage =
+      data.usage &&
+      (data.usage.prompt_tokens !== undefined || data.usage.completion_tokens !== undefined)
+        ? {
+            promptTokens: data.usage.prompt_tokens ?? 0,
+            completionTokens: data.usage.completion_tokens ?? 0,
+          }
+        : undefined;
 
     const toolCall = message.tool_calls?.[0];
     if (toolCall) {
@@ -93,11 +106,13 @@ export class LiveModel implements ModelAdapter {
       } catch {
         throw new Error(`模型工具调用参数不是合法 JSON：${toolCall.function.name}`);
       }
-      return { kind: 'tool_call', name: toolCall.function.name, input };
+      return usage ? { kind: 'tool_call', name: toolCall.function.name, input, usage } : { kind: 'tool_call', name: toolCall.function.name, input };
     }
     if (message.content && message.content.trim()) {
       // 无工具调用的文本即最终答案（模型完成时不再调用工具）
-      return { kind: 'finish', summary: message.content };
+      return usage
+        ? { kind: 'finish', summary: message.content, usage }
+        : { kind: 'finish', summary: message.content };
     }
     throw new Error('模型响应既无工具调用也无文本');
   }

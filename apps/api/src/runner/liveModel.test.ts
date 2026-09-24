@@ -99,6 +99,51 @@ test('LiveModel：历史重建 —— assistant 工具调用与 tool 结果消�
   assert.ok(String(toolMsg.content).includes('"data":3'));
 });
 
+test('LiveModel：modelId 优先于全局 modelName；响应 usage 解析进动作', async () => {
+  const { impl, calls } = scriptedFetch([
+    {
+      body: {
+        choices: [{ message: { content: null, tool_calls: [{ function: { name: 'calculate', arguments: '{"expression":"1+1"}' } }] } }],
+        usage: { prompt_tokens: 12, completion_tokens: 3 },
+      },
+    },
+    {
+      body: {
+        choices: [{ message: { content: '完成：结果是 2' } }],
+        usage: { prompt_tokens: 30, completion_tokens: 8 },
+      },
+    },
+  ]);
+  const model = makeModel(impl);
+
+  // 第一步：显式传入 modelId（deepseek-reasoner）→ 请求体用所选模型，动作携带用量
+  const toolAction = await model.nextStep('计算 1+1', [], undefined, 'deepseek-reasoner');
+  assert.deepEqual(toolAction, {
+    kind: 'tool_call',
+    name: 'calculate',
+    input: { expression: '1+1' },
+    usage: { promptTokens: 12, completionTokens: 3 },
+  });
+  assert.equal(calls[0]!.body.model, 'deepseek-reasoner');
+
+  // 第二步：不传 modelId → 回退全局 modelName（deepseek-chat）
+  const finishAction = await model.nextStep('计算 1+1', []);
+  assert.deepEqual(finishAction, {
+    kind: 'finish',
+    summary: '完成：结果是 2',
+    usage: { promptTokens: 30, completionTokens: 8 },
+  });
+  assert.equal(calls[1]!.body.model, 'deepseek-chat');
+});
+
+test('LiveModel：无 usage 字段的响应不携带用量（动作形状与 P3 一致）', async () => {
+  const { impl } = scriptedFetch([
+    { body: { choices: [{ message: { content: '直接完成' } }] } },
+  ]);
+  const action = await makeModel(impl).nextStep('x', []);
+  assert.deepEqual(action, { kind: 'finish', summary: '直接完成' }); // 无 usage 键
+});
+
 test('LiveModel：非法参数 / 空响应 / HTTP 错误 → 抛错（运行器转 model_error）', async () => {
   const badJson = scriptedFetch([
     {

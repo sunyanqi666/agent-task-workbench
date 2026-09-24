@@ -15,13 +15,14 @@
 | 方法 | 路径 | 说明 | 实现阶段 |
 | --- | --- | --- | --- |
 | GET | `/api/v1/health` | 服务状态、版本；不暴露配置或密钥 | P0 ✅ |
-| POST | `/api/v1/tasks` | 创建任务，返回 201 与任务对象；`mode: live` 暂返回 501 | P1 ✅ |
+| GET | `/api/v1/models` | 服务端受控模型目录（id + label） | P4 ✅ |
+| POST | `/api/v1/tasks` | 创建任务（可选 `modelId`），返回 201 与任务对象；live 未配置返回 503 | P1 ✅ |
 | GET | `/api/v1/tasks?limit=&offset=` | 按创建时间倒序分页查询（limit 1..100，默认 20） | P1 ✅ |
 | GET | `/api/v1/tasks/:id` | 获取任务快照 | P1 ✅ |
 | GET | `/api/v1/tasks/:id/events?afterSeq=n` | 获取持久化事件以供回放（默认 afterSeq=0） | P1 ✅ |
 | GET | `/api/v1/tasks/:id/stream` | SSE 推送新事件；事件 ID 使用 `seq`，支持从上次序号续接 | P2 ✅ |
 | POST | `/api/v1/tasks/:id/cancel` | 请求取消；终态重复操作保持幂等 | P3 ✅ |
-| POST | `/api/v1/tasks/:id/retry` | 创建新任务并关联原任务（`parentTaskId`） | P3 ✅ |
+| POST | `/api/v1/tasks/:id/retry` | 创建新任务并关联原任务（`parentTaskId`，沿用原任务模型） | P3 ✅ |
 
 ### 示例（P1/P2 已实现端点）
 
@@ -73,10 +74,17 @@ curl -X POST "http://localhost:3000/api/v1/tasks/<id>/retry"
 
 ### live 模式（真实模型，P3）
 
-- 环境变量：`MODEL_PROVIDER=deepseek` 与 `MODEL_API_KEY` 必填；`MODEL_BASE_URL`（默认 `https://api.deepseek.com`）、`MODEL_NAME`（默认 `deepseek-chat`）可选。密钥仅服务端读取，不进入事件与日志。
+- 环境变量：`MODEL_PROVIDER=deepseek` 与 `MODEL_API_KEY` 必填；`MODEL_BASE_URL`（默认 `https://api.deepseek.com`）、`MODEL_NAME`（默认 `deepseek-chat`，仅作未选模型时的回退）可选。密钥仅服务端读取，不进入事件与日志。
 - 未配置时创建或重试 live 任务返回 503（`live_model_not_configured`），不返回假成功。
 - 适配器走 OpenAI 兼容 chat completions：每次步进重建消息序列（system + prompt + 历史输出 / 工具调用与结果），携带白名单工具声明；模型返回工具调用则继续循环，返回纯文本即视为最终总结（finish）。
 - 每次模型调用与工具执行共用 `STEP_TIMEOUT_MS` 步超时预算，且可被取消信号中止。
+
+### 模型选择与用量（P4）
+
+- **受控目录**：`GET /api/v1/models` 返回服务端允许的模型（当前为 `deepseek-chat` / `deepseek-reasoner`）。前端只能提交目录中的 `modelId`，非法值返回 400；缺省为 `deepseek-chat`。
+- **固化选择**：创建任务时 `modelId` 写入任务行（`tasks.model_id`），重试生成的新任务沿用原任务选择；live 适配器按任务所选模型发起请求（未指定回退全局 `MODEL_NAME`）。
+- **用量记录**：live 模型每次响应中供应商返回的 `usage`（`prompt_tokens` / `completion_tokens`）累加到任务行（`tasks.prompt_tokens` / `tasks.completion_tokens`），任务快照以 `usage: { promptTokens, completionTokens }` 返回；demo 任务恒为 0。用量是任务行事实而非过程事件，不进入事件流。
+- 账号、额度与费用控制（P5）建立在这条链路之上：当前 live 接口无用户隔离与费用限制，公开部署前必须补上。
 
 ## 任务状态机
 

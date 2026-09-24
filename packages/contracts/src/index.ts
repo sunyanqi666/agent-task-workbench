@@ -10,6 +10,26 @@ export const APP_VERSION = '0.1.0';
 /** demo：确定性模拟事件，不读取密钥；live：真实模型服务（P3 接入） */
 export type ModelMode = 'demo' | 'live';
 
+// ===== 模型目录（P4：逐任务选模型的第一片） =====
+export interface ModelInfo {
+  /** 模型 id：创建任务时提交的受控标识（如 deepseek-chat） */
+  id: string;
+  /** 展示名：前端直接渲染 */
+  label: string;
+}
+
+/**
+ * 服务端受控模型目录：前端只能提交目录中的 id，由 GET /api/v1/models 下发。
+ * 当前为同一供应商（DeepSeek）的两个模型；多供应商适配在 P5 扩展。
+ */
+export const AVAILABLE_MODELS: readonly ModelInfo[] = [
+  { id: 'deepseek-chat', label: 'DeepSeek Chat（通用）' },
+  { id: 'deepseek-reasoner', label: 'DeepSeek Reasoner（推理）' },
+];
+
+/** 未指定 modelId 时的缺省模型 */
+export const DEFAULT_MODEL_ID: string = AVAILABLE_MODELS[0]!.id;
+
 // ===== 任务状态机 =====
 // queued -> running -> completed | failed
 // queued | running -> canceled（用户取消）
@@ -28,12 +48,22 @@ export const TASK_STATUS_TRANSITIONS: Readonly<
 };
 
 // ===== 任务 =====
+/** 供应商返回的 token 用量（live 任务逐次累加；demo 任务恒为 0） */
+export interface TaskUsage {
+  promptTokens: number;
+  completionTokens: number;
+}
+
 export interface Task {
   id: string;
   /** 用户完整任务输入；非空且长度受限（服务端校验） */
   prompt: string;
   status: TaskStatus;
   mode: ModelMode;
+  /** 创建时固化的模型 id（来自 AVAILABLE_MODELS；重试沿用原任务选择） */
+  modelId: string;
+  /** 供应商返回的累计用量；随每次模型响应累加 */
+  usage: TaskUsage;
   /** 重试产生的新任务指向原任务 id；首次创建为 null */
   parentTaskId: string | null;
   /** 以下时间均为 ISO 8601 字符串 */
@@ -141,6 +171,13 @@ export interface CreateTaskInput {
   prompt: string;
   /** 缺省为 demo；live 在 P3 接入 */
   mode?: ModelMode;
+  /** 所选模型 id：必须是 AVAILABLE_MODELS 中的项，非法值 400；缺省 DEFAULT_MODEL_ID */
+  modelId?: string;
+}
+
+/** GET /api/v1/models 响应：服务端受控模型目录 */
+export interface ModelListResponse {
+  models: ModelInfo[];
 }
 
 /** GET /api/v1/tasks 响应：按创建时间倒序分页 */

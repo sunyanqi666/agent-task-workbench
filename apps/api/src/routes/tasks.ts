@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { CreateTaskInput, TaskEvent, TaskEventType } from 'contracts';
-import { PROMPT_MAX_LENGTH } from 'contracts';
+import { AVAILABLE_MODELS, PROMPT_MAX_LENGTH } from 'contracts';
 import { AppError, ConflictError, NotFoundError, ValidationError } from '../services/errors';
 import {
   createTask,
@@ -39,7 +39,7 @@ function parseCreateInput(body: unknown): CreateTaskInput {
   if (typeof body !== 'object' || body === null) {
     throw new ValidationError('请求体必须是 JSON 对象');
   }
-  const { prompt, mode } = body as Record<string, unknown>;
+  const { prompt, mode, modelId } = body as Record<string, unknown>;
   if (typeof prompt !== 'string' || prompt.trim().length === 0) {
     throw new ValidationError('prompt 不能为空');
   }
@@ -49,7 +49,18 @@ function parseCreateInput(body: unknown): CreateTaskInput {
   if (mode !== undefined && mode !== 'demo' && mode !== 'live') {
     throw new ValidationError('mode 只能为 demo 或 live');
   }
-  return { prompt, mode: mode === 'live' ? 'live' : 'demo' };
+  // modelId 受控白名单：前端只能提交目录（GET /api/v1/models）中的 id
+  if (modelId !== undefined) {
+    if (typeof modelId !== 'string' || !AVAILABLE_MODELS.some((m) => m.id === modelId)) {
+      const ids = AVAILABLE_MODELS.map((m) => m.id).join(' / ');
+      throw new ValidationError(`modelId 必须是受控模型目录中的 id（可选：${ids}）`);
+    }
+  }
+  return {
+    prompt,
+    mode: mode === 'live' ? 'live' : 'demo',
+    ...(typeof modelId === 'string' ? { modelId } : {}),
+  };
 }
 
 export function registerTaskRoutes(app: FastifyInstance, deps: RunnerDeps): void {
@@ -218,6 +229,7 @@ export function registerTaskRoutes(app: FastifyInstance, deps: RunnerDeps): void
     const retry = createTask(deps.db, {
       prompt: task.prompt,
       mode: task.mode,
+      modelId: task.modelId, // 重试沿用原任务创建时固化的模型选择
       parentTaskId: task.id,
     });
     void runTask(deps, retry.id);

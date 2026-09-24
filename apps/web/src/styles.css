@@ -150,7 +150,8 @@ main {
 }
 
 /* ===== 表单 ===== */
-form textarea {
+form textarea,
+form select {
   width: 100%;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -161,10 +162,17 @@ form textarea {
   background: #fafafa;
 }
 
-form textarea:focus {
+form textarea:focus,
+form select:focus {
   outline: none;
   border-color: var(--accent);
   background: #fff;
+}
+
+.form-row {
+  display: flex;
+  gap: 12px;
+  margin-top: 10px;
 }
 
 .form-footer {

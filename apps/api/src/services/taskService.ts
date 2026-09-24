@@ -9,8 +9,9 @@ import type {
   TaskEventType,
   TaskEventPayloads,
   TaskStatus,
+  TaskUsage,
 } from 'contracts';
-import { TASK_STATUS_TRANSITIONS } from 'contracts';
+import { DEFAULT_MODEL_ID, TASK_STATUS_TRANSITIONS } from 'contracts';
 import { queryAll, queryOne } from '../db';
 import { ConflictError, NotFoundError } from './errors';
 import { publishTaskEvent } from './eventBus';
@@ -26,6 +27,9 @@ interface TaskRow {
   prompt: string;
   status: TaskStatus;
   mode: ModelMode;
+  model_id: string;
+  prompt_tokens: number;
+  completion_tokens: number;
   parent_task_id: string | null;
   created_at: string;
   updated_at: string;
@@ -49,6 +53,8 @@ function rowToTask(row: TaskRow): Task {
     prompt: row.prompt,
     status: row.status,
     mode: row.mode,
+    modelId: row.model_id,
+    usage: { promptTokens: row.prompt_tokens, completionTokens: row.completion_tokens },
     parentTaskId: row.parent_task_id,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -225,11 +231,18 @@ export function createTask(db: DatabaseSync, input: CreateTaskInput & { parentTa
 
   const event = transaction(db, () => {
     db.prepare(
-      'INSERT INTO tasks (id, prompt, status, mode, parent_task_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
-    ).run(id, prompt, 'queued', mode, input.parentTaskId ?? null, now, now);
+      'INSERT INTO tasks (id, prompt, status, mode, model_id, parent_task_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    ).run(id, prompt, 'queued', mode, input.modelId ?? DEFAULT_MODEL_ID, input.parentTaskId ?? null, now, now);
     return insertEvent(db, id, 'task.created', { prompt });
   });
   publishTaskEvent(event);
 
   return getTask(db, id);
+}
+
+/** 累加供应商返回的用量（单条 UPDATE 原子；不产生事件 —— 用量是任务行事实，不是过程事件） */
+export function recordModelUsage(db: DatabaseSync, taskId: string, usage: TaskUsage): void {
+  db.prepare(
+    'UPDATE tasks SET prompt_tokens = prompt_tokens + ?, completion_tokens = completion_tokens + ?, updated_at = ? WHERE id = ?',
+  ).run(usage.promptTokens, usage.completionTokens, new Date().toISOString(), taskId);
 }
