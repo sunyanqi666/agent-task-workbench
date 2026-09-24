@@ -34,7 +34,8 @@ test('取消 queued 任务：直接落终态，事件包含 task.canceled', asyn
 });
 
 test('取消 running 任务：202 受理 → 运行器协作终止，task.canceled 是最后一个事件', async (t) => {
-  const { app, cleanup } = await makeApp({ demoStepDelayMs: 60 });
+  // 步长 500ms 拉长执行窗口：慢速 CI runner 上取消请求也必须稳定落在 running 期间
+  const { app, cleanup } = await makeApp({ demoStepDelayMs: 500 });
   t.after(cleanup);
 
   const createRes = await app.inject({

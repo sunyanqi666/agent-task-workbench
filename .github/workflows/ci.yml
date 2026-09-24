@@ -29,5 +29,11 @@ jobs:
       - name: Lint
         run: pnpm lint
 
+      # 失败时把 TAP 输出中的 "not ok" 行转成 error 注解：失败测试名直接出现在 PR / check 视图与 API 中
       - name: Test
-        run: pnpm test
+        run: |
+          set -o pipefail
+          if ! pnpm test 2>&1 | tee /tmp/test-output.log; then
+            grep '^not ok' /tmp/test-output.log | sed 's/^/::error::/' || true
+            exit 1
+          fi
