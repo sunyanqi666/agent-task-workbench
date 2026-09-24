@@ -1,5 +1,5 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import type { ApiError, CreateTaskInput } from 'contracts';
+import type { ApiError, CreateTaskInput, TaskEvent, TaskEventType } from 'contracts';
 import { PROMPT_MAX_LENGTH } from 'contracts';
 import { NotFoundError, ValidationError } from '../services/errors';
 import {
@@ -9,6 +9,7 @@ import {
   listTasks,
   taskExists,
 } from '../services/taskService';
+import { subscribeTaskEvents } from '../services/eventBus';
 import { runTask, type RunnerDeps } from '../runner/runTask';
 
 /**
@@ -91,6 +92,88 @@ export function registerTaskRoutes(app: FastifyInstance, deps: RunnerDeps): void
     return { events: getEvents(deps.db, id, afterSeq) };
   });
 
+  // SSE 实时事件流：先回放 afterSeq 之后的持久化事件，再订阅新事件直至终态。
+  // 事件 ID 使用 seq；data 为完整 TaskEvent JSON（前端按 seq 幂等合并）。
+  app.get('/api/v1/tasks/:id/stream', async (request: FastifyRequest, reply: FastifyReply) => {
+    const { id } = request.params as { id: string };
+    const query = request.query as Record<string, string | undefined>;
+    const afterSeq = parseIntParam(query.afterSeq, 0, 0, 1_000_000, 'afterSeq');
+    if (!taskExists(deps.db, id)) throw new NotFoundError(`任务不存在：${id}`);
+
+    const TERMINAL_EVENT_TYPES = new Set<TaskEventType>([
+      'task.completed',
+      'task.failed',
+      'task.canceled',
+    ]);
+
+    reply.hijack(); // 直接控制底层 socket，Fastify 不再托管该响应
+    const raw = reply.raw;
+    raw.writeHead(200, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-cache, no-transform',
+      connection: 'keep-alive',
+      'x-accel-buffering': 'no', // 反向代理禁用缓冲
+    });
+
+    let lastSeq = afterSeq;
+    let closed = false;
+    const writeEvent = (event: TaskEvent): void => {
+      raw.write(`id: ${event.seq}\n`);
+      raw.write(`data: ${JSON.stringify(event)}\n\n`);
+    };
+    const finish = (): void => {
+      if (closed) return;
+      closed = true;
+      clearInterval(heartbeat);
+      unsubscribe();
+      raw.end();
+    };
+
+    // 先订阅再回放：订阅期间到达的事件进缓冲，回放完成后按 seq 排序补发，避免与回放交错乱序
+    let replaying = true;
+    const buffered: TaskEvent[] = [];
+    const unsubscribe = subscribeTaskEvents(id, (event) => {
+      if (replaying) {
+        buffered.push(event);
+        return;
+      }
+      if (event.seq <= lastSeq) return;
+      writeEvent(event);
+      lastSeq = event.seq;
+      if (TERMINAL_EVENT_TYPES.has(event.type)) finish();
+    });
+
+    const heartbeat = setInterval(() => {
+      if (!closed) raw.write(': ping\n\n');
+    }, 15_000);
+
+    for (const event of getEvents(deps.db, id, afterSeq)) {
+      writeEvent(event);
+      lastSeq = event.seq;
+    }
+    replaying = false;
+    buffered.sort((a, b) => a.seq - b.seq);
+    for (const event of buffered) {
+      if (event.seq > lastSeq) {
+        writeEvent(event);
+        lastSeq = event.seq;
+        if (TERMINAL_EVENT_TYPES.has(event.type)) {
+          finish();
+          return;
+        }
+      }
+    }
+
+    // afterSeq 已覆盖全部事件（如客户端重连）时按快照判断是否终态
+    const snapshot = getTask(deps.db, id);
+    if (['completed', 'failed', 'canceled'].includes(snapshot.status)) {
+      finish();
+      return;
+    }
+
+    request.raw.on('close', finish);
+  });
+
   const notImplemented = async (
     request: FastifyRequest,
     reply: FastifyReply,
@@ -105,7 +188,6 @@ export function registerTaskRoutes(app: FastifyInstance, deps: RunnerDeps): void
     };
   };
 
-  app.get('/api/v1/tasks/:id/stream', notImplemented); // SSE 实时事件流，事件 ID 使用 seq，P2
   app.post('/api/v1/tasks/:id/cancel', notImplemented); // 取消，终态幂等，P3
   app.post('/api/v1/tasks/:id/retry', notImplemented); // 重试生成新任务，P3
 }

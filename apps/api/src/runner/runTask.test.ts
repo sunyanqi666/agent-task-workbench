@@ -23,7 +23,7 @@ function makeRunner(overrides: Partial<RunnerDeps>): {
   const deps: RunnerDeps = {
     db,
     registry: new ToolRegistry(),
-    model: new DemoModel(),
+    model: new DemoModel(0), // 测试不引入节奏延迟
     maxSteps: 5,
     stepTimeoutMs: 1000,
     ...overrides,

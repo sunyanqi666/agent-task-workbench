@@ -1,0 +1,53 @@
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { randomUUID } from 'node:crypto';
+import type { FastifyInstance } from 'fastify';
+import type { DatabaseSync } from 'node:sqlite';
+import type { Task, TaskEvent } from 'contracts';
+import { loadConfig, type AppConfig } from './config';
+import { openDatabase } from './db';
+import { buildServer } from './app';
+
+/** 测试用应用组装：独立全新数据库 + 关闭日志 + demo 立即执行（delay=0） */
+export async function makeApp(options: { demoStepDelayMs?: number } = {}): Promise<{
+  app: FastifyInstance;
+  db: DatabaseSync;
+  config: AppConfig;
+  cleanup: () => Promise<void>;
+}> {
+  const dir = mkdtempSync(path.join(tmpdir(), 'workbench-test-'));
+  const config: AppConfig = loadConfig({
+    databaseUrl: path.join(dir, `${randomUUID()}.db`),
+    logger: false,
+    demoStepDelayMs: options.demoStepDelayMs ?? 0,
+  });
+  const db = openDatabase(config.databaseUrl);
+  const app = await buildServer(db, config);
+  return {
+    app,
+    db,
+    config,
+    cleanup: async () => {
+      await app.close();
+      db.close();
+      rmSync(dir, { recursive: true, force: true });
+    },
+  };
+}
+
+/** 轮询任务直至终态 */
+export async function waitForTerminal(app: FastifyInstance, id: string, tries = 200): Promise<Task> {
+  for (let i = 0; i < tries; i++) {
+    const res = await app.inject({ method: 'GET', url: `/api/v1/tasks/${id}` });
+    const task = res.json() as Task;
+    if (['completed', 'failed', 'canceled'].includes(task.status)) return task;
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  throw new Error(`任务 ${id} 未在预期时间内到达终态`);
+}
+
+/** 解析 SSE 文本中的 data 事件（`: ping` 注释与 id: 行被忽略） */
+export function parseSseEvents(body: string): TaskEvent[] {
+  return [...body.matchAll(/^data: (.+)$/gm)].map((m) => JSON.parse(m[1]!) as TaskEvent);
+}

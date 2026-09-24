@@ -19,11 +19,11 @@
 | GET | `/api/v1/tasks?limit=&offset=` | 按创建时间倒序分页查询（limit 1..100，默认 20） | P1 ✅ |
 | GET | `/api/v1/tasks/:id` | 获取任务快照 | P1 ✅ |
 | GET | `/api/v1/tasks/:id/events?afterSeq=n` | 获取持久化事件以供回放（默认 afterSeq=0） | P1 ✅ |
-| GET | `/api/v1/tasks/:id/stream` | SSE 推送新事件；事件 ID 使用 `seq`，支持从上次序号续接 | P2 |
+| GET | `/api/v1/tasks/:id/stream` | SSE 推送新事件；事件 ID 使用 `seq`，支持从上次序号续接 | P2 ✅ |
 | POST | `/api/v1/tasks/:id/cancel` | 请求取消；终态重复操作保持幂等 | P3 |
 | POST | `/api/v1/tasks/:id/retry` | 创建新任务并关联原任务（`parentTaskId`） | P3 |
 
-### 示例（P1 已实现端点）
+### 示例（P1/P2 已实现端点）
 
 ```bash
 # 创建任务（demo 模式）：POST 后异步执行
@@ -35,10 +35,20 @@ curl -X POST http://localhost:3000/api/v1/tasks \
 # 查看终态与事件回放
 curl http://localhost:3000/api/v1/tasks/<id>
 curl "http://localhost:3000/api/v1/tasks/<id>/events?afterSeq=0"
+
+# 实时订阅（SSE，-N 关闭缓冲）
+curl -N "http://localhost:3000/api/v1/tasks/<id>/stream?afterSeq=0"
 ```
 
 创建后事件序列（demo 表达式任务）：
 `task.created → task.started → model.output → tool.started → tool.completed → model.output → task.completed`
+
+### SSE 流（`GET /api/v1/tasks/:id/stream`）
+
+- **帧格式**：每条事件两行——`id: <seq>` + `data: <TaskEvent JSON>`，事件间空行分隔；不使用 `event:` 字段，客户端 `onmessage` 统一处理；每 15 秒发送 `: ping` 注释行作心跳，代理场景带 `x-accel-buffering: no` 防缓冲。
+- **续接语义**：`afterSeq`（默认 0）之后的事件先从数据库**回放**，再实时推送新事件，因此连接建立瞬间不会丢事件也不会乱序。
+- **关闭语义**：任务进入终态（`task.completed` / `task.failed` / `task.canceled`）推送后服务端关闭流；连接已终态任务时直接回放完关闭。
+- **客户端幂等**：浏览器 `EventSource` 断线自动重连（URL 固定 `afterSeq` 会重发已收事件），前端按 `seq` 去重合并即可；这也是刷新后恢复现场的方式——先 `GET /events` 全量回放，再从最后 `seq` 续接订阅。
 
 ## 任务状态机
 

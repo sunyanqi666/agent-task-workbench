@@ -1,51 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import type { FastifyInstance } from 'fastify';
-import type { DatabaseSync } from 'node:sqlite';
 import type { Task, TaskEvent } from 'contracts';
 import { PROMPT_MAX_LENGTH } from 'contracts';
-import { loadConfig, type AppConfig } from './config';
-import { openDatabase, queryAll } from './db';
-import { buildServer } from './app';
-
-/** 每个用例使用独立的全新数据库：同时验证迁移可在新数据库上执行 */
-async function makeApp(): Promise<{
-  app: FastifyInstance;
-  db: DatabaseSync;
-  cleanup: () => Promise<void>;
-}> {
-  const dir = mkdtempSync(path.join(tmpdir(), 'workbench-test-'));
-  const config: AppConfig = loadConfig({
-    databaseUrl: path.join(dir, `${randomUUID()}.db`),
-    logger: false,
-  });
-  const db = openDatabase(config.databaseUrl);
-  const app = await buildServer(db, config);
-  return {
-    app,
-    db,
-    cleanup: async () => {
-      await app.close();
-      db.close();
-      rmSync(dir, { recursive: true, force: true });
-    },
-  };
-}
-
-/** 轮询任务直至终态（demo 执行极快，一次微任务即可完成） */
-async function waitForTerminal(app: FastifyInstance, id: string): Promise<Task> {
-  for (let i = 0; i < 100; i++) {
-    const res = await app.inject({ method: 'GET', url: `/api/v1/tasks/${id}` });
-    const task = res.json() as Task;
-    if (['completed', 'failed', 'canceled'].includes(task.status)) return task;
-    await new Promise((r) => setTimeout(r, 10));
-  }
-  throw new Error(`任务 ${id} 未在预期时间内到达终态`);
-}
+import { queryAll } from './db';
+import { makeApp, waitForTerminal } from './testing';
 
 test('健康检查返回预期结构，迁移在新数据库上成功执行', async (t) => {
   const { app, db, cleanup } = await makeApp();
@@ -240,12 +199,14 @@ test('无效 JSON 请求体返回 400', async (t) => {
   assert.equal(res.json().error.code, 'bad_request');
 });
 
-test('P2/P3 端点保持 501 契约占位', async (t) => {
+test('P3 端点保持 501 契约占位', async (t) => {
   const { app, cleanup } = await makeApp();
   t.after(cleanup);
 
   const id = randomUUID();
-  const res = await app.inject({ method: 'GET', url: `/api/v1/tasks/${id}/stream` });
-  assert.equal(res.statusCode, 501);
-  assert.equal(res.json().error.code, 'not_implemented');
+  for (const url of [`/api/v1/tasks/${id}/cancel`, `/api/v1/tasks/${id}/retry`]) {
+    const res = await app.inject({ method: 'POST', url });
+    assert.equal(res.statusCode, 501);
+    assert.equal(res.json().error.code, 'not_implemented');
+  }
 });

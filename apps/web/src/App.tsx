@@ -1,10 +1,27 @@
 import { useEffect, useState } from 'react';
 import type { HealthInfo } from 'contracts';
 import { fetchHealth } from './api';
+import { TaskCreateForm } from './components/TaskCreateForm';
+import { TaskList } from './components/TaskList';
+import { TaskDetail } from './components/TaskDetail';
+
+/** hash 路由：#/tasks/:id → 详情；其余 → 首页（创建 + 列表）。
+ *  刷新后从 hash 恢复视图，任务数据从持久化事件回放，天然一致。 */
+function useTaskIdFromHash(): string | null {
+  const [hash, setHash] = useState(() => window.location.hash);
+  useEffect(() => {
+    const onChange = () => setHash(window.location.hash);
+    window.addEventListener('hashchange', onChange);
+    return () => window.removeEventListener('hashchange', onChange);
+  }, []);
+  const match = hash.match(/^#\/tasks\/([0-9a-zA-Z-]+)$/);
+  return match?.[1] ?? null;
+}
 
 export default function App() {
   const [health, setHealth] = useState<HealthInfo | null>(null);
   const [down, setDown] = useState(false);
+  const activeTaskId = useTaskIdFromHash();
 
   useEffect(() => {
     let cancelled = false;
@@ -32,26 +49,32 @@ export default function App() {
       ? '连接中…'
       : `API 正常 · v${health.version}`;
 
+  const openTask = (id: string) => {
+    window.location.hash = `#/tasks/${id}`;
+  };
+  const backHome = () => {
+    window.location.hash = '';
+  };
+
   return (
     <div className="page">
       <header className="header">
         <div>
           <h1>Agent Task Workbench</h1>
-          <p className="subtitle">可观察的 Agent 任务执行：创建 → 执行 → 工具调用 → 回放</p>
+          <p className="subtitle">可观察的 Agent 任务执行：创建 → 执行 → 工具调用 → 实时回放</p>
         </div>
         <div className={`badge ${down ? 'badge-down' : ''}`}>{badgeText}</div>
       </header>
 
       <main>
-        <section className="card">
-          <h2>说明</h2>
-          <p className="empty">
-            任务执行引擎已就绪：调用 <code>POST /api/v1/tasks</code> 创建任务，
-            后端将执行模拟模型与受限工具调用，全部事件持久化到 SQLite，
-            可通过 <code>GET /api/v1/tasks/:id/events</code> 回放。
-            实时界面将在 P2 提供。
-          </p>
-        </section>
+        {activeTaskId ? (
+          <TaskDetail id={activeTaskId} onBack={backHome} />
+        ) : (
+          <>
+            <TaskCreateForm onCreated={openTask} />
+            <TaskList onOpen={openTask} />
+          </>
+        )}
       </main>
 
       <footer className="footer">

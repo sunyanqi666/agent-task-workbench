@@ -11,6 +11,8 @@ export interface AppConfig {
   modelApiKey: string | undefined;
   maxSteps: number;
   stepTimeoutMs: number;
+  /** demo 模型每步之间的固定延迟：让执行过程在 SSE 实时流中可见；0 表示立即执行 */
+  demoStepDelayMs: number;
   /** Fastify 日志开关（测试时关闭避免噪音） */
   logger: boolean;
 }
@@ -55,6 +57,7 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     modelApiKey: process.env.MODEL_API_KEY,
     maxSteps: intEnv('MAX_STEPS', 20),
     stepTimeoutMs: intEnv('STEP_TIMEOUT_MS', 60_000),
+    demoStepDelayMs: intEnv('DEMO_STEP_DELAY_MS', 400),
     logger: true,
     ...overrides,
   };

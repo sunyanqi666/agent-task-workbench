@@ -34,7 +34,7 @@ export async function buildServer(
   const runner: RunnerDeps = {
     db,
     registry: createDefaultToolRegistry(),
-    model: new DemoModel(),
+    model: new DemoModel(config.demoStepDelayMs),
     maxSteps: config.maxSteps,
     stepTimeoutMs: config.stepTimeoutMs,
   };

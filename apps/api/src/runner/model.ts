@@ -42,9 +42,16 @@ export function extractArithmeticExpression(prompt: string): string | null {
  * DemoModel：确定性模拟。
  * 固定流程（4 步）：开场输出 → 工具调用（表达式则 calculate，否则 text_stats）
  * → 结果描述输出 → finish 总结。相同 prompt 产生完全相同的事件序列。
+ * stepDelayMs 模拟模型思考节奏（默认 400ms），让执行过程在实时流中可见；
+ * 置 0 用于测试。
  */
 export class DemoModel implements ModelAdapter {
+  constructor(private readonly stepDelayMs = 400) {}
+
   async nextStep(prompt: string, history: readonly StepRecord[]): Promise<ModelAction> {
+    if (this.stepDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, this.stepDelayMs));
+    }
     const outputs = history.filter((h) => h.action.kind === 'output').length;
     const toolCalls = history.filter((h) => h.action.kind === 'tool_call').length;
 

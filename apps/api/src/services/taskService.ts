@@ -13,6 +13,7 @@ import type {
 import { TASK_STATUS_TRANSITIONS } from 'contracts';
 import { queryAll, queryOne } from '../db';
 import { ConflictError, NotFoundError } from './errors';
+import { publishTaskEvent } from './eventBus';
 
 /**
  * 任务服务：唯一有权读写 tasks / task_events 的模块。
@@ -68,21 +69,30 @@ function rowToEvent(row: EventRow): TaskEvent {
   };
 }
 
-/** 在当前事务内追加事件：seq = 任务内 max(seq) + 1（SQLite 写锁保证原子） */
+/** 在当前事务内追加事件：seq = 任务内 max(seq) + 1（SQLite 写锁保证原子）；返回构造好的事件对象 */
 function insertEvent(
   db: DatabaseSync,
   taskId: string,
   type: TaskEventType,
   payload: TaskEventPayloads[TaskEventType],
-): void {
+): TaskEvent {
   const { next } = queryOne<{ next: number }>(
     db,
     'SELECT COALESCE(MAX(seq), 0) + 1 AS next FROM task_events WHERE task_id = ?',
     taskId,
   )!;
+  const event: TaskEvent = {
+    id: randomUUID(),
+    taskId,
+    seq: next,
+    type,
+    payload,
+    createdAt: new Date().toISOString(),
+  };
   db.prepare(
     'INSERT INTO task_events (id, task_id, seq, type, payload, created_at) VALUES (?, ?, ?, ?, ?, ?)',
-  ).run(randomUUID(), taskId, next, type, JSON.stringify(payload), new Date().toISOString());
+  ).run(event.id, taskId, event.seq, event.type, JSON.stringify(event.payload), event.createdAt);
+  return event;
 }
 
 /** 包裹事务：异常时回滚并原样抛出 */
@@ -112,7 +122,7 @@ export type TransitionInput =
  * 非法迁移抛 ConflictError(409) 且不产生任何写入（事务回滚）。
  */
 export function transitionTask(db: DatabaseSync, taskId: string, input: TransitionInput): Task {
-  return transaction(db, () => {
+  const { task, event } = transaction(db, () => {
     const row = queryOne<TaskRow>(db, 'SELECT * FROM tasks WHERE id = ?', taskId);
     if (!row) throw new NotFoundError(`任务不存在：${taskId}`);
 
@@ -123,21 +133,22 @@ export function transitionTask(db: DatabaseSync, taskId: string, input: Transiti
     }
 
     const now = new Date().toISOString();
+    let event: TaskEvent;
     if (to === 'running') {
       db.prepare(
         "UPDATE tasks SET status = 'running', started_at = ?, updated_at = ? WHERE id = ?",
       ).run(now, now, taskId);
-      insertEvent(db, taskId, 'task.started', {});
+      event = insertEvent(db, taskId, 'task.started', {});
     } else if (to === 'completed') {
       db.prepare(
         "UPDATE tasks SET status = 'completed', finished_at = ?, updated_at = ?, error_code = NULL WHERE id = ?",
       ).run(now, now, taskId);
-      insertEvent(db, taskId, 'task.completed', { summary: input.summary });
+      event = insertEvent(db, taskId, 'task.completed', { summary: input.summary });
     } else if (to === 'failed') {
       db.prepare(
         'UPDATE tasks SET status = ?, finished_at = ?, updated_at = ?, error_code = ? WHERE id = ?',
       ).run(to, now, now, input.errorCode, taskId);
-      insertEvent(db, taskId, 'task.failed', {
+      event = insertEvent(db, taskId, 'task.failed', {
         errorCode: input.errorCode,
         message: input.message,
       });
@@ -145,11 +156,13 @@ export function transitionTask(db: DatabaseSync, taskId: string, input: Transiti
       db.prepare(
         "UPDATE tasks SET status = 'canceled', finished_at = ?, updated_at = ?, error_code = 'canceled' WHERE id = ?",
       ).run(now, now, taskId);
-      insertEvent(db, taskId, 'task.canceled', {});
+      event = insertEvent(db, taskId, 'task.canceled', {});
     }
 
-    return rowToTask(queryOne<TaskRow>(db, 'SELECT * FROM tasks WHERE id = ?', taskId)!);
+    return { task: rowToTask(queryOne<TaskRow>(db, 'SELECT * FROM tasks WHERE id = ?', taskId)!), event };
   });
+  publishTaskEvent(event); // 事务提交成功后再广播，订阅者读到的数据必然已持久化
+  return task;
 }
 
 /** 运行中过程事件（model.output / tool.*）：不改变状态，独立事务追加 */
@@ -159,7 +172,8 @@ export function appendEvent<P extends TaskEventType>(
   type: P,
   payload: TaskEventPayloads[P],
 ): void {
-  transaction(db, () => insertEvent(db, taskId, type, payload));
+  const event = transaction(db, () => insertEvent(db, taskId, type, payload));
+  publishTaskEvent(event);
 }
 
 // ===== 查询 =====
@@ -209,12 +223,13 @@ export function createTask(db: DatabaseSync, input: CreateTaskInput): Task {
   const now = new Date().toISOString();
   const id = randomUUID();
 
-  transaction(db, () => {
+  const event = transaction(db, () => {
     db.prepare(
       'INSERT INTO tasks (id, prompt, status, mode, parent_task_id, created_at, updated_at) VALUES (?, ?, ?, ?, NULL, ?, ?)',
     ).run(id, prompt, 'queued', mode, now, now);
-    insertEvent(db, id, 'task.created', { prompt });
+    return insertEvent(db, id, 'task.created', { prompt });
   });
+  publishTaskEvent(event);
 
   return getTask(db, id);
 }
