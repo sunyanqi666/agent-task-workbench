@@ -63,6 +63,16 @@ export async function fetchTaskEvents(id: string, afterSeq = 0): Promise<TaskEve
   return events;
 }
 
+/** 取消任务：queued 直接落终态；running 返回 202 受理，终态经事件流推送 */
+export async function cancelTask(id: string): Promise<Task> {
+  return request<Task>(`/api/v1/tasks/${id}/cancel`, { method: 'POST' });
+}
+
+/** 重试失败/已取消任务：服务端创建新任务（parentTaskId 关联原任务）并立即执行 */
+export async function retryTask(id: string): Promise<Task> {
+  return request<Task>(`/api/v1/tasks/${id}/retry`, { method: 'POST' });
+}
+
 /**
  * 订阅任务 SSE 实时流：服务端先回放 afterSeq 之后的持久化事件，再推送新事件直至终态后关闭。
  * onEvent 收到的数据按 seq 幂等合并即可（EventSource 自动重连可能重复投递）。

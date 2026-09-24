@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { Task, TaskEvent, TaskStatus } from 'contracts';
-import { fetchTask, fetchTaskEvents, streamTaskEvents } from '../api';
+import { cancelTask, fetchTask, fetchTaskEvents, retryTask, streamTaskEvents } from '../api';
 import { StatusBadge } from './StatusBadge';
 import { EventTimeline } from './EventTimeline';
 
@@ -19,14 +19,26 @@ function statusOfTerminalEvent(event: TaskEvent): TaskStatus {
   return 'canceled';
 }
 
-export function TaskDetail({ id, onBack }: { id: string; onBack: () => void }) {
+export function TaskDetail({
+  id,
+  onBack,
+  onOpenTask,
+}: {
+  id: string;
+  onBack: () => void;
+  onOpenTask: (id: string) => void;
+}) {
   const [task, setTask] = useState<Task | null>(null);
   const [events, setEvents] = useState<Map<number, TaskEvent>>(new Map());
   const [error, setError] = useState<string | null>(null);
+  const [actionPending, setActionPending] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     let closeStream: (() => void) | null = null;
+    setActionError(null);
+    setActionPending(false);
 
     const load = async () => {
       try {
@@ -87,6 +99,35 @@ export function TaskDetail({ id, onBack }: { id: string; onBack: () => void }) {
     [events],
   );
 
+  const handleCancel = async (): Promise<void> => {
+    if (!task || actionPending) return;
+    setActionError(null);
+    setActionPending(true);
+    try {
+      const updated = await cancelTask(task.id);
+      // queued：立即 canceled；running：受理时仍 running，终态由 SSE 事件流推送
+      setTask(updated);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : '取消失败');
+    } finally {
+      setActionPending(false);
+    }
+  };
+
+  const handleRetry = async (): Promise<void> => {
+    if (!task || actionPending) return;
+    setActionError(null);
+    setActionPending(true);
+    try {
+      const retry = await retryTask(task.id);
+      onOpenTask(retry.id); // 跳转到重试生成的新任务
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : '重试失败');
+    } finally {
+      setActionPending(false);
+    }
+  };
+
   if (error) {
     return (
       <section className="card">
@@ -119,6 +160,29 @@ export function TaskDetail({ id, onBack }: { id: string; onBack: () => void }) {
             <span>创建：{new Date(task.createdAt).toLocaleString('zh-CN', { hour12: false })}</span>
             {running && <span className="live-indicator">实时接收事件中…</span>}
           </div>
+          <div className="detail-actions">
+            {(task.status === 'queued' || task.status === 'running') && (
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => void handleCancel()}
+                disabled={actionPending}
+              >
+                取消任务
+              </button>
+            )}
+            {(task.status === 'failed' || task.status === 'canceled') && (
+              <button
+                type="button"
+                className="primary-button"
+                onClick={() => void handleRetry()}
+                disabled={actionPending}
+              >
+                重试此任务
+              </button>
+            )}
+          </div>
+          {actionError && <p className="form-error">{actionError}</p>}
           <div className="timeline-wrap">
             <EventTimeline events={ordered} />
           </div>

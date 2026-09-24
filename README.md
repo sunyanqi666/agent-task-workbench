@@ -5,10 +5,10 @@
 ## 当前进度
 
 - **P0 项目骨架（已完成）**：前后端骨架、数据契约、SQLite 版本化迁移、健康检查、类型检查 / 静态检查 / 最小测试
-- P1 可运行任务：状态机、模拟模型、工具调用循环（下一步）
-- P2 实时界面：SSE 步骤流与回放
-- P3 真实模型接入与取消 / 重试 / 超时
-- P4 工程化与作品集交付（测试、容器、部署、演示）
+- **P1 可运行任务（已完成）**：状态机、模拟模型、白名单工具调用循环、事件持久化与回放
+- **P2 实时界面（已完成）**：SSE 实时事件流（回放 + 续接）、创建 / 列表 / 详情 / 时间线，刷新后数据一致
+- **P3 真实模型与控制（已完成）**：DeepSeek（OpenAI 兼容）live 模式、协作式取消、失败重试（parentTaskId 关联）
+- P4 工程化与作品集交付（测试、容器、部署、演示）（下一步）
 
 ## 快速开始
 
@@ -30,7 +30,7 @@ pnpm dev
 ```bash
 pnpm typecheck   # 全部包 TypeScript 类型检查
 pnpm lint        # ESLint 静态检查
-pnpm test        # API 最小测试（健康检查、错误结构、迁移）
+pnpm test        # node:test 测试套件（状态机、运行器、SSE、取消/重试、工具）
 pnpm build       # 构建前端产物（apps/web/dist，可由 API 直接托管）
 pnpm start       # 生产模式启动 API（托管已构建的前端）
 ```
@@ -39,8 +39,8 @@ pnpm start       # 生产模式启动 API（托管已构建的前端）
 
 ```
 ├── apps/
-│   ├── web/                  # React + TypeScript + Vite；P0 为应用壳与 API 连通状态
-│   └── api/                  # Fastify + TypeScript；路由、配置、数据库、迁移
+│   ├── web/                  # React + TypeScript + Vite；创建表单 / 列表 / 详情时间线（取消 / 重试）
+│   └── api/                  # Fastify + TypeScript；路由、任务服务、运行器、工具注册表
 │       ├── migrations/       # SQLite 版本化迁移（user_version 记录进度）
 │       └── src/
 │           ├── app.ts        # buildServer：组装路由与错误处理（可测试入口）

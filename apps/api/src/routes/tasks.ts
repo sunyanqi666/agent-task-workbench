@@ -1,15 +1,17 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import type { ApiError, CreateTaskInput, TaskEvent, TaskEventType } from 'contracts';
+import type { CreateTaskInput, TaskEvent, TaskEventType } from 'contracts';
 import { PROMPT_MAX_LENGTH } from 'contracts';
-import { NotFoundError, ValidationError } from '../services/errors';
+import { AppError, ConflictError, NotFoundError, ValidationError } from '../services/errors';
 import {
   createTask,
   getEvents,
   getTask,
   listTasks,
   taskExists,
+  transitionTask,
 } from '../services/taskService';
 import { subscribeTaskEvents } from '../services/eventBus';
+import { getCancelController } from '../runner/cancelRegistry';
 import { runTask, type RunnerDeps } from '../runner/runTask';
 
 /**
@@ -54,12 +56,13 @@ export function registerTaskRoutes(app: FastifyInstance, deps: RunnerDeps): void
   // 创建任务：201 返回 queued 快照，执行在后台异步进行（事件与状态随之持久化）
   app.post('/api/v1/tasks', async (request: FastifyRequest, reply: FastifyReply) => {
     const input = parseCreateInput(request.body);
-    if (input.mode === 'live') {
-      // live 依赖真实模型密钥与适配，在 P3 接入；不返回假成功
-      reply.code(501);
-      return {
-        error: { code: 'not_implemented', message: 'live 模式将在 P3 接入', requestId: request.id },
-      } satisfies ApiError;
+    if (input.mode === 'live' && !deps.liveModel) {
+      // live 依赖真实模型密钥；未配置返回 503 明确提示，不返回假成功
+      throw new AppError(
+        '真实模型未配置（需设置 MODEL_PROVIDER=deepseek 与 MODEL_API_KEY），暂无法创建 live 任务',
+        503,
+        'live_model_not_configured',
+      );
     }
     const task = createTask(deps.db, input);
     void runTask(deps, task.id); // 异步执行，不阻塞 201 响应
@@ -174,20 +177,51 @@ export function registerTaskRoutes(app: FastifyInstance, deps: RunnerDeps): void
     request.raw.on('close', finish);
   });
 
-  const notImplemented = async (
-    request: FastifyRequest,
-    reply: FastifyReply,
-  ): Promise<ApiError> => {
-    reply.code(501);
-    return {
-      error: {
-        code: 'not_implemented',
-        message: '契约已定义，将在后续阶段实现',
-        requestId: request.id,
-      },
-    };
-  };
+  // 取消任务：queued 直接落终态；running 经注册表发协作式取消信号（202，终态由运行器写入）；
+  // 已取消幂等返回 200；completed / failed 返回 409。
+  app.post('/api/v1/tasks/:id/cancel', async (request: FastifyRequest, reply: FastifyReply) => {
+    const { id } = request.params as { id: string };
+    if (!taskExists(deps.db, id)) throw new NotFoundError(`任务不存在：${id}`);
+    const task = getTask(deps.db, id);
 
-  app.post('/api/v1/tasks/:id/cancel', notImplemented); // 取消，终态幂等，P3
-  app.post('/api/v1/tasks/:id/retry', notImplemented); // 重试生成新任务，P3
+    if (task.status === 'canceled') return task; // 幂等：重复取消返回当前快照
+    if (task.status === 'completed' || task.status === 'failed') {
+      throw new ConflictError(`任务已${task.status === 'completed' ? '完成' : '失败'}，无法取消`);
+    }
+    if (task.status === 'queued') {
+      return transitionTask(deps.db, id, { to: 'canceled' });
+    }
+    // running：优先通知运行器协作式取消；无控制器（如重启后的孤儿任务）直接落终态
+    const controller = getCancelController(id);
+    if (controller) {
+      controller.abort();
+      reply.code(202); // 取消请求已受理，终态由运行器经事件流推送
+      return task;
+    }
+    return transitionTask(deps.db, id, { to: 'canceled' });
+  });
+
+  // 重试：仅失败 / 已取消任务可重试；生成新任务（parentTaskId 指向原任务），不改写历史。
+  // 重复重试会产生多个新任务，各自独立执行 —— 关联关系明确，不产生混乱记录。
+  app.post('/api/v1/tasks/:id/retry', async (request: FastifyRequest, reply: FastifyReply) => {
+    const { id } = request.params as { id: string };
+    if (!taskExists(deps.db, id)) throw new NotFoundError(`任务不存在：${id}`);
+    const task = getTask(deps.db, id);
+
+    if (task.status !== 'failed' && task.status !== 'canceled') {
+      throw new ConflictError(`仅失败或已取消的任务可重试（当前状态：${task.status}）`);
+    }
+    if (task.mode === 'live' && !deps.liveModel) {
+      throw new AppError('真实模型未配置，无法重试 live 任务', 503, 'live_model_not_configured');
+    }
+
+    const retry = createTask(deps.db, {
+      prompt: task.prompt,
+      mode: task.mode,
+      parentTaskId: task.id,
+    });
+    void runTask(deps, retry.id);
+    reply.code(201);
+    return retry;
+  });
 }

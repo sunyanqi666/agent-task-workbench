@@ -11,6 +11,7 @@ import { registerHealthRoutes } from './routes/health';
 import { registerTaskRoutes } from './routes/tasks';
 import { createDefaultToolRegistry } from './tools';
 import { DemoModel } from './runner/model';
+import { LiveModel } from './runner/liveModel';
 import type { RunnerDeps } from './runner/runTask';
 import { AppError } from './services/errors';
 
@@ -31,10 +32,28 @@ export async function buildServer(
     genReqId: () => randomUUID(), // requestId 贯穿日志与错误响应
   });
 
+  // live 模型：仅支持 deepseek（OpenAI 兼容 chat completions）；
+  // 未配置（无提供方或无密钥）时为 null —— 创建与重试入口返回 503，绝不下发假成功
+  const registry = createDefaultToolRegistry();
+  const liveModel =
+    config.modelProvider === 'deepseek' && config.modelApiKey
+      ? new LiveModel({
+          apiKey: config.modelApiKey,
+          baseUrl: config.modelBaseUrl,
+          modelName: config.modelName,
+          registry,
+          timeoutMs: config.stepTimeoutMs,
+        })
+      : null;
+  if (config.modelProvider && config.modelProvider !== 'deepseek') {
+    app.log.warn(`未支持的 MODEL_PROVIDER=${config.modelProvider}，live 任务不可用`);
+  }
+
   const runner: RunnerDeps = {
     db,
-    registry: createDefaultToolRegistry(),
+    registry,
     model: new DemoModel(config.demoStepDelayMs),
+    liveModel,
     maxSteps: config.maxSteps,
     stepTimeoutMs: config.stepTimeoutMs,
   };

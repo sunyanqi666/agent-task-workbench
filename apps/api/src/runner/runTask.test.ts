@@ -24,6 +24,7 @@ function makeRunner(overrides: Partial<RunnerDeps>): {
     db,
     registry: new ToolRegistry(),
     model: new DemoModel(0), // 测试不引入节奏延迟
+    liveModel: null, // 默认不配置真实模型；live 相关测试显式覆盖
     maxSteps: 5,
     stepTimeoutMs: 1000,
     ...overrides,
@@ -165,6 +166,20 @@ test('模型抛错 → task.failed(model_error)', async (t) => {
   const final = getTask(db, task.id);
   assert.equal(final.status, 'failed');
   assert.equal(final.errorCode, 'model_error');
+});
+
+test('live 任务未配置 liveModel → failed(model_error) 而非悬挂', async (t) => {
+  const { deps, db, cleanup } = makeRunner({});
+  t.after(cleanup);
+
+  const task = createTask(db, { prompt: 'x', mode: 'live' });
+  await runTask(deps, task.id);
+
+  const final = getTask(db, task.id);
+  assert.equal(final.status, 'failed');
+  assert.equal(final.errorCode, 'model_error');
+  const failedEvent = getEvents(db, task.id, 0).find((e) => e.type === 'task.failed')!;
+  assert.ok((failedEvent.payload as { message: string }).message.includes('未配置'));
 });
 
 test('runTask 幂等：终态任务重复执行不产生新事件', async (t) => {

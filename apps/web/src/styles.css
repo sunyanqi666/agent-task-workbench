@@ -295,6 +295,49 @@ form textarea:focus {
   animation: pulse 1.2s ease-in-out infinite;
 }
 
+/* ===== 详情操作（取消 / 重试） ===== */
+.detail-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.primary-button {
+  border: none;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 14px;
+  padding: 8px 18px;
+  cursor: pointer;
+  font: inherit;
+}
+
+.primary-button:disabled {
+  background: #93b4f5;
+  cursor: not-allowed;
+}
+
+.secondary-button {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--text);
+  font-size: 14px;
+  padding: 8px 18px;
+  cursor: pointer;
+  font: inherit;
+}
+
+.secondary-button:hover:not(:disabled) {
+  border-color: #f87171;
+  color: #b91c1c;
+}
+
+.secondary-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 @keyframes pulse {
   50% {
     opacity: 0.2;

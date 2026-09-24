@@ -9,6 +9,10 @@ export interface AppConfig {
   /** 模型提供方；空字符串表示仅演示模式 */
   modelProvider: string;
   modelApiKey: string | undefined;
+  /** 真实模型 API 根地址（OpenAI 兼容 chat completions） */
+  modelBaseUrl: string;
+  /** 真实模型名（如 deepseek-chat） */
+  modelName: string;
   maxSteps: number;
   stepTimeoutMs: number;
   /** demo 模型每步之间的固定延迟：让执行过程在 SSE 实时流中可见；0 表示立即执行 */
@@ -44,6 +48,12 @@ function intEnv(key: string, fallback: number): number {
   return Number(process.env[key] ?? fallback) || fallback;
 }
 
+/** 读取字符串环境变量；空白视为未设置，回退默认值 */
+function stringEnv(key: string, fallback: string): string {
+  const value = process.env[key]?.trim();
+  return value ? value : fallback;
+}
+
 export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   // 配置文件固定从仓库根目录读取，与命令执行位置无关
   loadEnvFile(path.join(repoRoot, '.env'));
@@ -55,6 +65,8 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     databaseUrl,
     modelProvider: process.env.MODEL_PROVIDER ?? '',
     modelApiKey: process.env.MODEL_API_KEY,
+    modelBaseUrl: stringEnv('MODEL_BASE_URL', 'https://api.deepseek.com'),
+    modelName: stringEnv('MODEL_NAME', 'deepseek-chat'),
     maxSteps: intEnv('MAX_STEPS', 20),
     stepTimeoutMs: intEnv('STEP_TIMEOUT_MS', 60_000),
     demoStepDelayMs: intEnv('DEMO_STEP_DELAY_MS', 400),

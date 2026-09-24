@@ -20,8 +20,8 @@
 | GET | `/api/v1/tasks/:id` | 获取任务快照 | P1 ✅ |
 | GET | `/api/v1/tasks/:id/events?afterSeq=n` | 获取持久化事件以供回放（默认 afterSeq=0） | P1 ✅ |
 | GET | `/api/v1/tasks/:id/stream` | SSE 推送新事件；事件 ID 使用 `seq`，支持从上次序号续接 | P2 ✅ |
-| POST | `/api/v1/tasks/:id/cancel` | 请求取消；终态重复操作保持幂等 | P3 |
-| POST | `/api/v1/tasks/:id/retry` | 创建新任务并关联原任务（`parentTaskId`） | P3 |
+| POST | `/api/v1/tasks/:id/cancel` | 请求取消；终态重复操作保持幂等 | P3 ✅ |
+| POST | `/api/v1/tasks/:id/retry` | 创建新任务并关联原任务（`parentTaskId`） | P3 ✅ |
 
 ### 示例（P1/P2 已实现端点）
 
@@ -38,6 +38,12 @@ curl "http://localhost:3000/api/v1/tasks/<id>/events?afterSeq=0"
 
 # 实时订阅（SSE，-N 关闭缓冲）
 curl -N "http://localhost:3000/api/v1/tasks/<id>/stream?afterSeq=0"
+
+# 取消（queued/已取消 → 200；running → 202 受理，终态经事件流推送）
+curl -X POST "http://localhost:3000/api/v1/tasks/<id>/cancel"
+
+# 重试失败/已取消任务 → 201 新任务（parentTaskId 关联原任务）
+curl -X POST "http://localhost:3000/api/v1/tasks/<id>/retry"
 ```
 
 创建后事件序列（demo 表达式任务）：
@@ -49,6 +55,28 @@ curl -N "http://localhost:3000/api/v1/tasks/<id>/stream?afterSeq=0"
 - **续接语义**：`afterSeq`（默认 0）之后的事件先从数据库**回放**，再实时推送新事件，因此连接建立瞬间不会丢事件也不会乱序。
 - **关闭语义**：任务进入终态（`task.completed` / `task.failed` / `task.canceled`）推送后服务端关闭流；连接已终态任务时直接回放完关闭。
 - **客户端幂等**：浏览器 `EventSource` 断线自动重连（URL 固定 `afterSeq` 会重发已收事件），前端按 `seq` 去重合并即可；这也是刷新后恢复现场的方式——先 `GET /events` 全量回放，再从最后 `seq` 续接订阅。
+
+### 任务控制（cancel / retry，P3）
+
+`POST /api/v1/tasks/:id/cancel`：
+
+- `queued`：直接落 `canceled`，返回 200 与终态快照；
+- `running`：经进程内注册表向运行器发**协作式取消信号**，返回 **202**（已受理），终态由运行器写入并经事件流推送；
+- `canceled`：幂等返回 200 当前快照；`completed` / `failed`：409。
+- 取消生效点：运行器步间检查、模型 HTTP 调用（取消信号透传给适配器）、工具执行（与超时信号合并，任一触发即中止）；生效后 `task.canceled` 是最后一个事件，之后不再写入过程事件。
+- 进程重启遗留的 running 孤儿任务：注册表无记录时取消直接落终态，不依赖内存状态。
+
+`POST /api/v1/tasks/:id/retry`：
+
+- 仅 `failed` / `canceled` 任务可重试，其他状态 409；
+- 创建**新任务**（同 prompt / 同 mode，`parentTaskId` 指向原任务）并异步执行，原任务历史不改写；返回 201 与新任务快照；重复重试会各自生成独立新任务，关联关系明确。
+
+### live 模式（真实模型，P3）
+
+- 环境变量：`MODEL_PROVIDER=deepseek` 与 `MODEL_API_KEY` 必填；`MODEL_BASE_URL`（默认 `https://api.deepseek.com`）、`MODEL_NAME`（默认 `deepseek-chat`）可选。密钥仅服务端读取，不进入事件与日志。
+- 未配置时创建或重试 live 任务返回 503（`live_model_not_configured`），不返回假成功。
+- 适配器走 OpenAI 兼容 chat completions：每次步进重建消息序列（system + prompt + 历史输出 / 工具调用与结果），携带白名单工具声明；模型返回工具调用则继续循环，返回纯文本即视为最终总结（finish）。
+- 每次模型调用与工具执行共用 `STEP_TIMEOUT_MS` 步超时预算，且可被取消信号中止。
 
 ## 任务状态机
 

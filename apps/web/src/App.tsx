@@ -68,7 +68,7 @@ export default function App() {
 
       <main>
         {activeTaskId ? (
-          <TaskDetail id={activeTaskId} onBack={backHome} />
+          <TaskDetail id={activeTaskId} onBack={backHome} onOpenTask={openTask} />
         ) : (
           <>
             <TaskCreateForm onCreated={openTask} />

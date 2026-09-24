@@ -138,7 +138,7 @@ test('输入校验：空 / 超长 prompt 与非法 mode 返回 400', async (t) =
   await bad({ prompt: 'ok', mode: 'invalid' });
 });
 
-test('live 模式尚未接入：返回 501 而非假成功', async (t) => {
+test('live 未配置真实模型：创建返回 503 与明确提示（而非假成功）', async (t) => {
   const { app, cleanup } = await makeApp();
   t.after(cleanup);
 
@@ -147,8 +147,9 @@ test('live 模式尚未接入：返回 501 而非假成功', async (t) => {
     url: '/api/v1/tasks',
     payload: { prompt: 'x', mode: 'live' },
   });
-  assert.equal(res.statusCode, 501);
-  assert.equal(res.json().error.code, 'not_implemented');
+  assert.equal(res.statusCode, 503);
+  assert.equal(res.json().error.code, 'live_model_not_configured');
+  assert.ok(res.json().error.message.includes('MODEL_API_KEY'));
 });
 
 test('不存在的任务：详情与事件均返回 404', async (t) => {
@@ -199,14 +200,14 @@ test('无效 JSON 请求体返回 400', async (t) => {
   assert.equal(res.json().error.code, 'bad_request');
 });
 
-test('P3 端点保持 501 契约占位', async (t) => {
+test('cancel / retry 不存在的任务返回 404', async (t) => {
   const { app, cleanup } = await makeApp();
   t.after(cleanup);
 
-  const id = randomUUID();
-  for (const url of [`/api/v1/tasks/${id}/cancel`, `/api/v1/tasks/${id}/retry`]) {
+  const missing = randomUUID();
+  for (const url of [`/api/v1/tasks/${missing}/cancel`, `/api/v1/tasks/${missing}/retry`]) {
     const res = await app.inject({ method: 'POST', url });
-    assert.equal(res.statusCode, 501);
-    assert.equal(res.json().error.code, 'not_implemented');
+    assert.equal(res.statusCode, 404);
+    assert.equal(res.json().error.code, 'not_found');
   }
 });

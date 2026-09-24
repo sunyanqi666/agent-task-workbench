@@ -21,8 +21,9 @@ export interface ModelAdapter {
   /**
    * 根据任务 prompt 与已执行历史决定下一步。
    * 实现必须保证可终止（最终返回 finish）或由运行器步数上限兜底。
+   * signal：任务取消信号；长时间操作（如真实模型的 HTTP 调用）应及时中止。
    */
-  nextStep(prompt: string, history: readonly StepRecord[]): Promise<ModelAction>;
+  nextStep(prompt: string, history: readonly StepRecord[], signal?: AbortSignal): Promise<ModelAction>;
 }
 
 /** 从 prompt 中提取可求值的算术表达式片段；找不到或不可求值返回 null */

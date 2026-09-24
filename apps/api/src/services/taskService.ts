@@ -216,8 +216,8 @@ export function getEvents(db: DatabaseSync, taskId: string, afterSeq: number): T
 
 // ===== 创建 =====
 
-/** 创建任务：插入 queued 任务 + task.created 事件，同一事务 */
-export function createTask(db: DatabaseSync, input: CreateTaskInput): Task {
+/** 创建任务：插入 queued 任务 + task.created 事件，同一事务；parentTaskId 用于重试关联 */
+export function createTask(db: DatabaseSync, input: CreateTaskInput & { parentTaskId?: string }): Task {
   const prompt = input.prompt.trim();
   const mode: ModelMode = input.mode ?? 'demo';
   const now = new Date().toISOString();
@@ -225,8 +225,8 @@ export function createTask(db: DatabaseSync, input: CreateTaskInput): Task {
 
   const event = transaction(db, () => {
     db.prepare(
-      'INSERT INTO tasks (id, prompt, status, mode, parent_task_id, created_at, updated_at) VALUES (?, ?, ?, ?, NULL, ?, ?)',
-    ).run(id, prompt, 'queued', mode, now, now);
+      'INSERT INTO tasks (id, prompt, status, mode, parent_task_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    ).run(id, prompt, 'queued', mode, input.parentTaskId ?? null, now, now);
     return insertEvent(db, id, 'task.created', { prompt });
   });
   publishTaskEvent(event);
