@@ -103,7 +103,7 @@ test('步数上限：模型不终止 → max_steps_exceeded 失败', async (t) =
 test('未注册工具：写入 tool.failed，模型可容错并完成', async (t) => {
   const { deps, db, cleanup } = makeRunner({
     model: scriptedModel([
-      { kind: 'tool_call', name: 'dangerous_tool', input: {} },
+      { kind: 'tool_call', calls: [{ name: 'dangerous_tool', input: {} }] },
       { kind: 'finish', summary: '容错完成' },
     ]),
   });
@@ -136,7 +136,7 @@ test('工具超时：超过 stepTimeoutMs → tool.failed(超时)', async (t) =>
   };
   const { deps, db, cleanup } = makeRunner({
     model: scriptedModel([
-      { kind: 'tool_call', name: 'slow', input: { ms: 200 } },
+      { kind: 'tool_call', calls: [{ name: 'slow', input: { ms: 200 } }] },
       { kind: 'finish', summary: '结束' },
     ]),
     stepTimeoutMs: 30,
@@ -149,6 +149,44 @@ test('工具超时：超过 stepTimeoutMs → tool.failed(超时)', async (t) =>
 
   const failedEvent = getEvents(db, task.id, 0).find((e) => e.type === 'tool.failed')!;
   assert.ok((failedEvent.payload as { error: string }).error.includes('超时'));
+});
+
+test('一轮多个工具调用：逐个执行、事件成对，任务完成', async (t) => {
+  const { deps, db, cleanup } = makeRunner({
+    model: scriptedModel([
+      {
+        kind: 'tool_call',
+        calls: [
+          { name: 'calculate', input: { expression: '1+2' } },
+          { name: 'text_stats', input: { text: '你好' } },
+        ],
+      },
+      { kind: 'finish', summary: '完成' },
+    ]),
+  });
+  t.after(cleanup);
+  deps.registry.register((await import('../tools/calculate')).calculateTool);
+  deps.registry.register((await import('../tools/textStats')).textStatsTool);
+
+  const task = createTask(db, { prompt: 'x' });
+  await runTask(deps, task.id);
+
+  assert.equal(getTask(db, task.id).status, 'completed');
+  const events = getEvents(db, task.id, 0);
+  // 两个调用各自产生 started + completed 事件对
+  assert.deepEqual(
+    events.map((e) => e.type),
+    [
+      'task.created', 'task.started',
+      'tool.started', 'tool.completed', 'tool.started', 'tool.completed',
+      'task.completed',
+    ],
+  );
+  const started = events.filter((e) => e.type === 'tool.started');
+  assert.deepEqual(started.map((e) => (e.payload as { name: string }).name), ['calculate', 'text_stats']);
+  const completed = events.filter((e) => e.type === 'tool.completed');
+  assert.equal((completed[0]!.payload as { output: number }).output, 3);
+  assert.deepEqual((completed[1]!.payload as { output: unknown }).output, { characters: 2, words: 1, lines: 1 });
 });
 
 test('模型抛错 → task.failed(model_error)', async (t) => {

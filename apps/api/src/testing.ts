@@ -10,7 +10,9 @@ import { openDatabase } from './db';
 import { buildServer } from './app';
 
 /** 测试用应用组装：独立全新数据库 + 关闭日志 + demo 立即执行（delay=0） */
-export async function makeApp(options: { demoStepDelayMs?: number } = {}): Promise<{
+export async function makeApp(
+  options: { demoStepDelayMs?: number; config?: Partial<AppConfig> } = {},
+): Promise<{
   app: FastifyInstance;
   db: DatabaseSync;
   config: AppConfig;
@@ -21,6 +23,13 @@ export async function makeApp(options: { demoStepDelayMs?: number } = {}): Promi
     databaseUrl: path.join(dir, `${randomUUID()}.db`),
     logger: false,
     demoStepDelayMs: options.demoStepDelayMs ?? 0,
+    // 测试隔离：显式固定模型配置，避免开发者本地 .env 泄入测试（CI 无 .env，两端结果保持一致）；
+    // 需要 live 配置的测试经 options.config 显式声明
+    modelProvider: '',
+    modelApiKey: undefined,
+    modelBaseUrl: 'https://api.deepseek.com',
+    modelName: 'deepseek-flash',
+    ...options.config,
   });
   const db = openDatabase(config.databaseUrl);
   const app = await buildServer(db, config);

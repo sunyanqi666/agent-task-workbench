@@ -30,15 +30,16 @@ function applyMigrations(db: DatabaseSync): void {
     const target = Number(file.split('_')[0]);
     if (Number.isNaN(target) || target <= current) continue;
     const sql = readFileSync(path.join(MIGRATIONS_DIR, file), 'utf8');
+    // 迁移语句与 user_version 更新必须同事务：中断后重启动不会重复执行已应用的迁移
     db.exec('BEGIN');
     try {
       db.exec(sql);
+      db.exec(`PRAGMA user_version = ${target}`);
       db.exec('COMMIT');
     } catch (err) {
       db.exec('ROLLBACK');
       throw err;
     }
-    db.exec(`PRAGMA user_version = ${target}`);
     current = target;
   }
 }

@@ -52,7 +52,7 @@ test('LiveModel：tool_calls 响应 → tool_call 动作；请求含模型名 / 
     },
   ]);
   const action = await makeModel(impl).nextStep('计算 (1+2)*3', []);
-  assert.deepEqual(action, { kind: 'tool_call', name: 'calculate', input: { expression: '(1+2)*3' } });
+  assert.deepEqual(action, { kind: 'tool_call', calls: [{ name: 'calculate', input: { expression: '(1+2)*3' } }] });
 
   const call = calls[0]!;
   assert.equal(call.url, 'https://api.example.com/chat/completions');
@@ -80,8 +80,8 @@ test('LiveModel：历史重建 —— assistant 工具调用与 tool 结果消�
   ]);
   const history: StepRecord[] = [
     {
-      action: { kind: 'tool_call', name: 'calculate', input: { expression: '1+2' } },
-      toolResult: { ok: true, data: 3 },
+      action: { kind: 'tool_call', calls: [{ name: 'calculate', input: { expression: '1+2' } }] },
+      toolResults: [{ ok: true, data: 3 }],
     },
   ];
   await makeModel(impl).nextStep('计算 1+2', history);
@@ -97,6 +97,58 @@ test('LiveModel：历史重建 —— assistant 工具调用与 tool 结果消�
   assert.ok(toolMsg, '应有 tool 结果消息');
   assert.equal(assistant.tool_calls![0]!.id, toolMsg.tool_call_id);
   assert.ok(String(toolMsg.content).includes('"data":3'));
+});
+
+test('LiveModel：一次返回多个 tool_calls 全部解析；回传时逐个成对', async () => {
+  const { impl, calls } = scriptedFetch([
+    {
+      body: {
+        choices: [
+          {
+            message: {
+              content: null,
+              tool_calls: [
+                { function: { name: 'calculate', arguments: '{"expression":"1+2"}' } },
+                { function: { name: 'text_stats', arguments: '{"text":"你好"}' } },
+              ],
+            },
+          },
+        ],
+      },
+    },
+    { body: { choices: [{ message: { content: '完成' } }] } },
+  ]);
+  const model = makeModel(impl);
+
+  // 全部调用（而非仅第一个）进入动作
+  const action = await model.nextStep('算 1+2 并统计文本', []);
+  assert.deepEqual(action, {
+    kind: 'tool_call',
+    calls: [
+      { name: 'calculate', input: { expression: '1+2' } },
+      { name: 'text_stats', input: { text: '你好' } },
+    ],
+  });
+
+  // 回传：assistant 声明全部调用（id 确定性生成），每个调用对应一条 tool 结果消息
+  const history: StepRecord[] = [
+    {
+      action,
+      toolResults: [{ ok: true, data: 3 }, { ok: true, data: { characters: 2, words: 1, lines: 1 } }],
+    },
+  ];
+  await model.nextStep('算 1+2 并统计文本', history);
+  const messages = calls[1]!.body.messages as Array<{
+    role: string;
+    content: string | null;
+    tool_calls?: { id: string }[];
+    tool_call_id?: string;
+  }>;
+  const assistant = messages.find((m) => m.role === 'assistant' && m.tool_calls);
+  const toolMsgs = messages.filter((m) => m.role === 'tool');
+  assert.deepEqual(assistant?.tool_calls?.map((c) => c.id), ['call_0_0', 'call_0_1']);
+  assert.deepEqual(toolMsgs.map((m) => m.tool_call_id), ['call_0_0', 'call_0_1']);
+  assert.ok(String(toolMsgs[0]!.content).includes('"data":3'));
 });
 
 test('LiveModel：reasoning_content 解析进动作，并在后续请求中随 assistant 消息传回', async () => {
@@ -124,7 +176,7 @@ test('LiveModel：reasoning_content 解析进动作，并在后续请求中随 a
   assert.equal(toolAction.kind === 'tool_call' ? toolAction.reasoning : undefined, '先算 1+2，再基于结果给出结论。');
 
   // 第二步：带工具调用的历史传回 → assistant 消息必须携带 reasoning_content（DeepSeek 缺失返回 400）
-  const history: StepRecord[] = [{ action: toolAction, toolResult: { ok: true, data: 3 } }];
+  const history: StepRecord[] = [{ action: toolAction, toolResults: [{ ok: true, data: 3 }] }];
   await model.nextStep('计算 1+2', history);
   const messages = calls[1]!.body.messages as Array<{
     role: string;
@@ -156,8 +208,7 @@ test('LiveModel：modelId 优先于全局 modelName；响应 usage 解析进动�
   const toolAction = await model.nextStep('计算 1+1', [], undefined, 'deepseek-v4-pro');
   assert.deepEqual(toolAction, {
     kind: 'tool_call',
-    name: 'calculate',
-    input: { expression: '1+1' },
+    calls: [{ name: 'calculate', input: { expression: '1+1' } }],
     usage: { promptTokens: 12, completionTokens: 3 },
   });
   assert.equal(calls[0]!.body.model, 'deepseek-v4-pro');

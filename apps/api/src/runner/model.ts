@@ -12,22 +12,28 @@ export interface ModelUsage {
   completionTokens: number;
 }
 
+/** 单个工具调用：一次模型响应可能并行返回多个 */
+export interface ModelToolCall {
+  name: string;
+  input: Record<string, unknown>;
+}
+
 export type ModelAction =
   | { kind: 'output'; text: string; usage?: ModelUsage }
   | {
       kind: 'tool_call';
-      name: string;
-      input: Record<string, unknown>;
+      /** 本轮返回的全部工具调用（运行器逐个执行，结果按序回传） */
+      calls: ModelToolCall[];
       usage?: ModelUsage;
       /** 推理模式返回的思维链：带工具调用的轮次必须在后续请求中传回（DeepSeek 要求，缺失返回 400） */
       reasoning?: string;
     }
   | { kind: 'finish'; summary: string; usage?: ModelUsage };
 
-/** 已执行步骤的记录：模型据此决定下一步；toolResult 仅在 tool_call 后存在 */
+/** 已执行步骤的记录：模型据此决定下一步；toolResults 仅在 tool_call 后存在，与 calls 一一对应 */
 export interface StepRecord {
   action: ModelAction;
-  toolResult?: ToolResult;
+  toolResults?: ToolResult[];
 }
 
 export interface ModelAdapter {
@@ -85,21 +91,22 @@ export class DemoModel implements ModelAdapter {
     if (outputs === 1 && toolCalls === 0) {
       const expression = extractArithmeticExpression(prompt);
       if (expression) {
-        return { kind: 'tool_call', name: 'calculate', input: { expression } };
+        return { kind: 'tool_call', calls: [{ name: 'calculate', input: { expression } }] };
       }
-      return { kind: 'tool_call', name: 'text_stats', input: { text: prompt } };
+      return { kind: 'tool_call', calls: [{ name: 'text_stats', input: { text: prompt } }] };
     }
 
     // 第 3 步：描述工具结果
     if (toolCalls === 1 && outputs === 1) {
       const call = history[history.length - 1]!;
       if (call.action.kind === 'tool_call') {
-        const result = call.toolResult;
+        const result = call.toolResults?.[0];
+        const first = call.action.calls[0]!;
         if (!result || !result.ok) {
           return { kind: 'output', text: `工具调用失败（${result?.error ?? '未知错误'}），任务无法继续计算。` };
         }
-        if (call.action.name === 'calculate') {
-          return { kind: 'output', text: `表达式计算结果：${String((call.action.input as { expression: string }).expression)} = ${String(result.data)}` };
+        if (first.name === 'calculate') {
+          return { kind: 'output', text: `表达式计算结果：${String((first.input as { expression: string }).expression)} = ${String(result.data)}` };
         }
         const data = result.data as { characters: number; words: number; lines: number };
         return { kind: 'output', text: `文本统计完成：共 ${data.characters} 字符 / ${data.words} 词 / ${data.lines} 行。` };
@@ -108,11 +115,13 @@ export class DemoModel implements ModelAdapter {
 
     // 第 4 步：总结
     const call = history.find((h) => h.action.kind === 'tool_call');
-    if (call && call.toolResult?.ok && call.action.kind === 'tool_call') {
-      if (call.action.name === 'calculate') {
-        return { kind: 'finish', summary: `计算完成：${String((call.action.input as { expression: string }).expression)} = ${String(call.toolResult.data)}` };
+    if (call && call.toolResults?.[0]?.ok && call.action.kind === 'tool_call') {
+      const first = call.action.calls[0]!;
+      const result = call.toolResults[0]!;
+      if (first.name === 'calculate') {
+        return { kind: 'finish', summary: `计算完成：${String((first.input as { expression: string }).expression)} = ${String(result.data)}` };
       }
-      const data = call.toolResult.data as { characters: number; words: number; lines: number };
+      const data = result.data as { characters: number; words: number; lines: number };
       return { kind: 'finish', summary: `文本分析完成：共 ${data.characters} 字符、${data.words} 词、${data.lines} 行。` };
     }
     return { kind: 'finish', summary: '任务处理结束（工具调用未成功）。' };

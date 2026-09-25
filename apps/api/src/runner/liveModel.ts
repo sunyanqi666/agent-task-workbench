@@ -1,5 +1,5 @@
 import type { ToolRegistry } from '../tools';
-import type { ModelAction, ModelAdapter, StepRecord } from './model';
+import type { ModelAction, ModelAdapter, ModelToolCall, StepRecord } from './model';
 
 /**
  * 真实模型适配器：DeepSeek（OpenAI 兼容 chat completions）。
@@ -108,15 +108,19 @@ export class LiveModel implements ModelAdapter {
       ...(reasoning ? { reasoning } : {}),
     };
 
-    const toolCall = message.tool_calls?.[0];
-    if (toolCall) {
+    // 一次响应可能返回多个工具调用：全部解析（任一参数非法即失败，避免部分执行）
+    const parsedCalls: ModelToolCall[] = [];
+    for (const raw of message.tool_calls ?? []) {
       let input: Record<string, unknown>;
       try {
-        input = JSON.parse(toolCall.function.arguments || '{}') as Record<string, unknown>;
+        input = JSON.parse(raw.function.arguments || '{}') as Record<string, unknown>;
       } catch {
-        throw new Error(`模型工具调用参数不是合法 JSON：${toolCall.function.name}`);
+        throw new Error(`模型工具调用参数不是合法 JSON：${raw.function.name}`);
       }
-      return { kind: 'tool_call', name: toolCall.function.name, input, ...extras };
+      parsedCalls.push({ name: raw.function.name, input });
+    }
+    if (parsedCalls.length > 0) {
+      return { kind: 'tool_call', calls: parsedCalls, ...extras };
     }
     if (message.content && message.content.trim()) {
       // 无工具调用的文本即最终答案（模型完成时不再调用工具）
@@ -127,8 +131,8 @@ export class LiveModel implements ModelAdapter {
 
   /**
    * 重建消息序列：system + user + 历史步骤。
-   * tool_call 步骤展开为「assistant 声明调用 + tool 携带结果」两条消息，
-   * id 成对且由序号确定性生成，满足 API 对消息配对的要求；
+   * tool_call 步骤展开为「assistant 声明全部调用 + 每个调用一条 tool 结果消息」，
+   * id 由记录序号 + 调用序号确定性生成并成对，满足 API 对消息配对的要求；
    * 该轮的思维链（reasoning_content）必须随 assistant 消息传回（DeepSeek 要求，缺失返回 400）。
    */
   private buildMessages(prompt: string, history: readonly StepRecord[]): ChatMessage[] {
@@ -143,23 +147,23 @@ export class LiveModel implements ModelAdapter {
         return;
       }
       if (action.kind !== 'tool_call') return; // finish 不会进入历史（运行器收到即终止），类型完备保护
-      const callId = `call_${index}`;
       messages.push({
         role: 'assistant',
         content: null,
         ...(action.reasoning ? { reasoning_content: action.reasoning } : {}),
-        tool_calls: [
-          {
-            id: callId,
-            type: 'function',
-            function: { name: action.name, arguments: JSON.stringify(action.input) },
-          },
-        ],
+        tool_calls: action.calls.map((call, callIndex) => ({
+          id: `call_${index}_${callIndex}`,
+          type: 'function' as const,
+          function: { name: call.name, arguments: JSON.stringify(call.input) },
+        })),
       });
-      messages.push({
-        role: 'tool',
-        content: JSON.stringify(record.toolResult ?? { ok: false, error: '结果缺失' }),
-        tool_call_id: callId,
+      action.calls.forEach((_call, callIndex) => {
+        const result = record.toolResults?.[callIndex];
+        messages.push({
+          role: 'tool',
+          content: JSON.stringify(result ?? { ok: false, error: '结果缺失' }),
+          tool_call_id: `call_${index}_${callIndex}`,
+        });
       });
     });
     return messages;

@@ -1,9 +1,9 @@
 import type { DatabaseSync } from 'node:sqlite';
-import type { TaskEventPayloads } from 'contracts';
+import type { TaskEventPayloads, ToolResult } from 'contracts';
 import type { ToolRegistry } from '../tools';
 import { validateToolInput } from '../tools';
 import { appendEvent, getTask, recordModelUsage, transitionTask } from '../services/taskService';
-import type { ModelAction, ModelAdapter, StepRecord } from './model';
+import type { ModelAction, ModelAdapter, ModelToolCall, StepRecord } from './model';
 import { registerCancel, unregisterCancel } from './cancelRegistry';
 
 /**
@@ -102,14 +102,17 @@ export async function runTask(deps: RunnerDeps, taskId: string): Promise<void> {
       }
 
       if (action.kind === 'tool_call') {
-        const record: StepRecord = { action };
+        // 一轮可能包含多个工具调用：逐个执行，每个调用产生 started + completed/failed 事件，
+        // 结果按序写入历史与该轮动作的 calls 一一对应（回传给模型时成对）
+        const toolResults: ToolResult[] = [];
+        const record: StepRecord = { action, toolResults };
         history.push(record);
-        appendEvent(db, taskId, 'tool.started', {
-          name: action.name,
-          input: action.input,
-        });
         try {
-          await executeToolCall(deps, taskId, record, controller.signal);
+          for (const call of action.calls) {
+            if (controller.signal.aborted) break; // 轮内取消：停止剩余调用，由步间检查统一转终态
+            appendEvent(db, taskId, 'tool.started', { name: call.name, input: call.input });
+            toolResults.push(await executeToolCall(deps, taskId, call, controller.signal));
+          }
         } catch (err) {
           if (err instanceof TaskCanceledError) {
             transitionTask(db, taskId, { to: 'canceled' });
@@ -150,49 +153,46 @@ export async function runTask(deps: RunnerDeps, taskId: string): Promise<void> {
 }
 
 /**
- * 执行单次工具调用：白名单校验 → 输入校验 → 超时与取消双信号受限执行；
- * 结果写入 tool.completed / tool.failed 事件；执行中途被取消则抛 TaskCanceledError（不写结果事件）
+ * 执行单个工具调用：白名单校验 → 输入校验 → 超时与取消双信号受限执行；
+ * 结果写入 tool.completed / tool.failed 事件并返回；执行中途被取消则抛 TaskCanceledError（不写结果事件）
  */
 async function executeToolCall(
   deps: RunnerDeps,
   taskId: string,
-  record: StepRecord,
+  call: ModelToolCall,
   cancelSignal: AbortSignal,
-): Promise<void> {
+): Promise<ToolResult> {
   const { db, registry, stepTimeoutMs } = deps;
-  const action = record.action;
-  if (action.kind !== 'tool_call') return;
 
-  const tool = registry.get(action.name);
-  const violation = tool ? validateToolInput(tool, action.input) : `工具未注册：${action.name}（白名单约束）`;
+  const tool = registry.get(call.name);
+  const violation = tool ? validateToolInput(tool, call.input) : `工具未注册：${call.name}（白名单约束）`;
 
   if (violation) {
-    record.toolResult = { ok: false, error: violation };
-    appendEvent(db, taskId, 'tool.failed', { name: action.name, error: violation });
-    return;
+    appendEvent(db, taskId, 'tool.failed', { name: call.name, error: violation });
+    return { ok: false, error: violation };
   }
 
   const startedAt = Date.now();
   try {
     // 超时与取消信号合并：任一触发即中止工具执行
     const signal = AbortSignal.any([AbortSignal.timeout(stepTimeoutMs), cancelSignal]);
-    const result = await tool!.execute(action.input, { taskId, signal });
+    const result = await tool!.execute(call.input, { taskId, signal });
     if (cancelSignal.aborted) throw new TaskCanceledError(); // 执行中被取消：结果不落事件
     const durationMs = Date.now() - startedAt;
-    record.toolResult = result;
     if (result.ok) {
       const payload: TaskEventPayloads['tool.completed'] = {
-        name: action.name,
+        name: call.name,
         output: result.data,
         durationMs,
       };
       appendEvent(db, taskId, 'tool.completed', payload);
     } else {
       appendEvent(db, taskId, 'tool.failed', {
-        name: action.name,
+        name: call.name,
         error: result.error ?? '未知错误',
       });
     }
+    return result;
   } catch (err) {
     if (cancelSignal.aborted || err instanceof TaskCanceledError) {
       throw new TaskCanceledError();
@@ -200,7 +200,7 @@ async function executeToolCall(
     const message = isTimeoutAbort(err)
       ? `工具执行超时（>${stepTimeoutMs}ms）`
       : `工具执行异常：${errorMessage(err)}`;
-    record.toolResult = { ok: false, error: message };
-    appendEvent(db, taskId, 'tool.failed', { name: action.name, error: message });
+    appendEvent(db, taskId, 'tool.failed', { name: call.name, error: message });
+    return { ok: false, error: message };
   }
 }
