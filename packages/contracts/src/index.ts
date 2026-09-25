@@ -82,6 +82,7 @@ export type TaskErrorCode =
   | 'timeout' // 步骤或任务超时
   | 'max_steps_exceeded' // 超过步数上限
   | 'canceled' // 用户取消
+  | 'interrupted' // 服务重启导致执行中断（启动恢复时标记）
   | 'internal'; // 其他未分类错误
 
 // ===== 任务事件 =====

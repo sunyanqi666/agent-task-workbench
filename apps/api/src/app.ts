@@ -14,6 +14,7 @@ import { createDefaultToolRegistry } from './tools';
 import { DemoModel } from './runner/model';
 import { LiveModel } from './runner/liveModel';
 import type { RunnerDeps } from './runner/runTask';
+import { recoverInterruptedTasks } from './runner/recovery';
 import { AppError } from './services/errors';
 
 const pkgRoot = path.resolve(fileURLToPath(new URL('.', import.meta.url)), '..');
@@ -56,8 +57,18 @@ export async function buildServer(
     model: new DemoModel(config.demoStepDelayMs),
     liveModel,
     maxSteps: config.maxSteps,
+    maxToolCallsPerTurn: config.maxToolCallsPerTurn,
     stepTimeoutMs: config.stepTimeoutMs,
   };
+
+  // 启动恢复：处理上次进程中断遗留的 queued / running 任务，保证不永久停留进行中状态
+  const recovery = recoverInterruptedTasks(runner);
+  if (recovery.resumed.length > 0) {
+    app.log.info(`启动恢复：${recovery.resumed.length} 个中断前排队任务已重新执行`);
+  }
+  if (recovery.interrupted.length > 0) {
+    app.log.warn(`启动恢复：${recovery.interrupted.length} 个中断前运行中任务已标记失败（interrupted）`);
+  }
 
   registerHealthRoutes(app, db);
   registerModelRoutes(app);

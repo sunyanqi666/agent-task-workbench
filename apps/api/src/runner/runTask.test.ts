@@ -26,6 +26,7 @@ function makeRunner(overrides: Partial<RunnerDeps>): {
     model: new DemoModel(0), // 测试不引入节奏延迟
     liveModel: null, // 默认不配置真实模型；live 相关测试显式覆盖
     maxSteps: 5,
+    maxToolCallsPerTurn: 10,
     stepTimeoutMs: 1000,
     ...overrides,
   };
@@ -187,6 +188,45 @@ test('一轮多个工具调用：逐个执行、事件成对，任务完成', as
   const completed = events.filter((e) => e.type === 'tool.completed');
   assert.equal((completed[0]!.payload as { output: number }).output, 3);
   assert.deepEqual((completed[1]!.payload as { output: unknown }).output, { characters: 2, words: 1, lines: 1 });
+});
+
+test('单轮工具调用上限：超限调用不执行，记为失败结果成对回传，任务可完成', async (t) => {
+  let seenToolResults: { total: number; failed: number } | undefined;
+  const scripted: ModelAdapter = {
+    async nextStep(_prompt, history) {
+      if (history.length === 0) {
+        return {
+          kind: 'tool_call',
+          calls: [
+            { name: 'calculate', input: { expression: '1+1' } },
+            { name: 'calculate', input: { expression: '2+2' } },
+            { name: 'calculate', input: { expression: '3+3' } },
+            { name: 'calculate', input: { expression: '4+4' } },
+          ],
+        };
+      }
+      // 第二轮检查回传历史：结果数量与调用一一对应（消息配对的前提）
+      const record = history[0]!;
+      const results = record.toolResults ?? [];
+      seenToolResults = { total: results.length, failed: results.filter((r) => !r.ok).length };
+      return { kind: 'finish', summary: '完成' };
+    },
+  };
+  const { deps, db, cleanup } = makeRunner({ model: scripted, maxToolCallsPerTurn: 2 });
+  t.after(cleanup);
+  deps.registry.register((await import('../tools/calculate')).calculateTool);
+
+  const task = createTask(db, { prompt: 'x' });
+  await runTask(deps, task.id);
+
+  assert.equal(getTask(db, task.id).status, 'completed');
+  const events = getEvents(db, task.id, 0);
+  const started = events.filter((e) => e.type === 'tool.started');
+  assert.equal(started.length, 2); // 仅前 2 个调用实际执行
+  const failed = events.filter((e) => e.type === 'tool.failed');
+  assert.equal(failed.length, 2); // 后 2 个超限，直接记为失败（无 started）
+  assert.ok(failed.every((e) => (e.payload as { error: string }).error.includes('上限')));
+  assert.deepEqual(seenToolResults, { total: 4, failed: 2 }); // 结果与 calls 一一对应
 });
 
 test('模型抛错 → task.failed(model_error)', async (t) => {

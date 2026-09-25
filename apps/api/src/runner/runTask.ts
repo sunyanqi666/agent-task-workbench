@@ -21,6 +21,8 @@ export interface RunnerDeps {
   /** live 模型（真实服务）；未配置为 null，创建与重试入口应先行校验 */
   liveModel: ModelAdapter | null;
   maxSteps: number;
+  /** 单轮模型响应允许执行的工具调用数量上限（超限调用不执行，记为失败结果回传） */
+  maxToolCallsPerTurn: number;
   stepTimeoutMs: number;
 }
 
@@ -103,13 +105,21 @@ export async function runTask(deps: RunnerDeps, taskId: string): Promise<void> {
 
       if (action.kind === 'tool_call') {
         // 一轮可能包含多个工具调用：逐个执行，每个调用产生 started + completed/failed 事件，
-        // 结果按序写入历史与该轮动作的 calls 一一对应（回传给模型时成对）
+        // 结果按序写入历史与该轮动作的 calls 一一对应（回传给模型时成对）。
+        // 单轮调用数受 maxToolCallsPerTurn 约束（maxSteps 只计模型轮次）：超限调用不执行，
+        // 记为失败结果回传（与未注册工具同为无 started 的 tool.failed），模型可据此容错。
         const toolResults: ToolResult[] = [];
         const record: StepRecord = { action, toolResults };
         history.push(record);
         try {
-          for (const call of action.calls) {
+          for (const [callIndex, call] of action.calls.entries()) {
             if (controller.signal.aborted) break; // 轮内取消：停止剩余调用，由步间检查统一转终态
+            if (callIndex >= deps.maxToolCallsPerTurn) {
+              const error = `超过单轮工具调用数量上限（${deps.maxToolCallsPerTurn}），本调用未执行`;
+              appendEvent(db, taskId, 'tool.failed', { name: call.name, error });
+              toolResults.push({ ok: false, error });
+              continue;
+            }
             appendEvent(db, taskId, 'tool.started', { name: call.name, input: call.input });
             toolResults.push(await executeToolCall(deps, taskId, call, controller.signal));
           }

@@ -88,6 +88,15 @@ curl -X POST "http://localhost:3000/api/v1/tasks/<id>/retry"
 - **多工具调用**：一次响应可返回多个 `tool_calls`，运行器逐个执行（每个调用产生 `tool.started` + `tool.completed`/`tool.failed` 事件对），结果按序回传——assistant 消息声明全部调用，每个调用对应一条 `tool` 结果消息（id 确定性生成并成对）；任一调用参数非法则整轮失败，避免部分执行。
 - 账号、额度与费用控制（P5）建立在这条链路之上：当前 live 接口无用户隔离与费用限制，公开部署前必须补上。
 
+### 启动恢复（P4）
+
+运行器循环与取消注册表都在进程内存中，进程中断后数据库可能遗留进行中状态的任务。服务启动时（注册路由前）识别并处理，保证任何任务都不会永久悬停：
+
+- `queued`（中断前尚未开始执行）：自动重新入队执行，事件与状态照常持久化；
+- `running`（中断前执行循环已随进程丢失）：落终态 `failed`，错误码 `interrupted`，可经重试生成新任务。
+
+处理数量输出到启动日志；恢复对已终态任务无影响。
+
 ## 任务状态机
 
 ```
@@ -118,4 +127,4 @@ queued ──▶ running ──▶ completed
 | `calculate` | `{ expression: string }` | 算术求值（+ - * / %、括号、小数）；手写递归下降解析器，不用 eval |
 | `text_stats` | `{ text: string }` | 统计字符数、词数、行数 |
 
-运行器只允许调用注册表内工具（白名单）；单步执行受 `STEP_TIMEOUT_MS` 超时约束，任务总步数受 `MAX_STEPS` 上限约束，超出即失败（`timeout` / `max_steps_exceeded`）。
+运行器只允许调用注册表内工具（白名单）；单步执行受 `STEP_TIMEOUT_MS` 超时约束，任务总步数受 `MAX_STEPS` 上限约束（只计模型轮次），一轮内执行的工具调用数受 `MAX_TOOL_CALLS_PER_TURN` 上限约束（超限调用不执行，记为失败结果回传，模型可容错），超出即失败（`timeout` / `max_steps_exceeded`）。

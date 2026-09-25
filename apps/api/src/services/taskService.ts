@@ -220,6 +220,16 @@ export function getEvents(db: DatabaseSync, taskId: string, afterSeq: number): T
   return rows.map(rowToEvent);
 }
 
+/** 列出未到达终态的任务（queued / running），按创建时间升序 —— 启动恢复识别孤儿任务用 */
+export function listUnfinishedTasks(
+  db: DatabaseSync,
+): Array<{ id: string; status: Extract<TaskStatus, 'queued' | 'running'> }> {
+  return queryAll<{ id: string; status: 'queued' | 'running' }>(
+    db,
+    "SELECT id, status FROM tasks WHERE status IN ('queued', 'running') ORDER BY created_at ASC",
+  );
+}
+
 // ===== 创建 =====
 
 /** 创建任务：插入 queued 任务 + task.created 事件，同一事务；parentTaskId 用于重试关联 */

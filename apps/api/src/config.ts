@@ -14,6 +14,8 @@ export interface AppConfig {
   /** 真实模型名（如 deepseek-flash）；仅作任务未指定模型时的回退值 */
   modelName: string;
   maxSteps: number;
+  /** 单轮模型响应允许执行的工具调用数量上限（maxSteps 只计模型轮次；超限调用记为失败结果回传） */
+  maxToolCallsPerTurn: number;
   stepTimeoutMs: number;
   /** demo 模型每步之间的固定延迟：让执行过程在 SSE 实时流中可见；0 表示立即执行 */
   demoStepDelayMs: number;
@@ -68,6 +70,7 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     modelBaseUrl: stringEnv('MODEL_BASE_URL', 'https://api.deepseek.com'),
     modelName: stringEnv('MODEL_NAME', 'deepseek-flash'),
     maxSteps: intEnv('MAX_STEPS', 20),
+    maxToolCallsPerTurn: intEnv('MAX_TOOL_CALLS_PER_TURN', 10),
     stepTimeoutMs: intEnv('STEP_TIMEOUT_MS', 60_000),
     demoStepDelayMs: intEnv('DEMO_STEP_DELAY_MS', 400),
     logger: true,
