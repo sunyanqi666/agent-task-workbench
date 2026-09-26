@@ -1,6 +1,9 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { DatabaseSync } from 'node:sqlite';
-import type { AuthResponse, MeResponse } from 'contracts';
+import type { AuthResponse, BalanceResponse, MeResponse } from 'contracts';
+import { getBalanceCny } from '../services/ledgerService';
+import { sumReservedCny } from '../services/taskService';
+import { UnauthorizedError } from '../services/errors';
 import {
   clearSessionCookieHeader,
   createSession,
@@ -65,5 +68,15 @@ export function registerAuthRoutes(app: FastifyInstance, db: DatabaseSync): void
   app.get('/api/v1/auth/me', async (request: FastifyRequest) => {
     const user = getUserFromRequest(db, request);
     return { user } satisfies MeResponse;
+  });
+
+  // 余额（P5 账本）：需登录；余额 = 账本代数和（已扣预留与实际消耗），reservedCny 为进行中 live 任务预留合计
+  app.get('/api/v1/me/balance', async (request: FastifyRequest) => {
+    const user = getUserFromRequest(db, request);
+    if (!user) throw new UnauthorizedError('查询余额需要登录');
+    return {
+      balanceCny: getBalanceCny(db, user.id),
+      reservedCny: sumReservedCny(db, user.id),
+    } satisfies BalanceResponse;
   });
 }

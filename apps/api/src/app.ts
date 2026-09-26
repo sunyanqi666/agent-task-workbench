@@ -11,6 +11,7 @@ import { registerHealthRoutes } from './routes/health';
 import { registerModelRoutes } from './routes/models';
 import { registerTaskRoutes } from './routes/tasks';
 import { registerAuthRoutes } from './routes/auth';
+import { registerPaymentRoutes } from './routes/payments';
 import { createDefaultToolRegistry } from './tools';
 import { DemoModel } from './runner/model';
 import { LiveModel } from './runner/liveModel';
@@ -63,6 +64,7 @@ export async function buildServer(
     maxUserConcurrentTasks: config.maxUserConcurrentTasks,
     userCreateRatePerMinute: config.userCreateRatePerMinute,
     maxTaskBudgetCny: config.maxTaskBudgetCny,
+    platformDailyBudgetCny: config.platformDailyBudgetCny,
   };
 
   // 启动恢复：处理上次进程中断遗留的 queued / running 任务，保证不永久停留进行中状态
@@ -75,8 +77,9 @@ export async function buildServer(
   }
 
   registerHealthRoutes(app, db);
-  registerModelRoutes(app);
+  registerModelRoutes(app, config.maxSteps);
   registerAuthRoutes(app, db);
+  registerPaymentRoutes(app, db);
   registerTaskRoutes(app, runner);
 
   app.setNotFoundHandler((request, reply) => {

@@ -31,6 +31,7 @@ function makeRunner(overrides: Partial<RunnerDeps>): {
     maxUserConcurrentTasks: 5,
     userCreateRatePerMinute: 10,
     maxTaskBudgetCny: 10,
+    platformDailyBudgetCny: 0, // 测试默认关闭平台预算告警
     ...overrides,
   };
   return { deps, db, cleanup: () => { db.close(); rmSync(dir, { recursive: true, force: true }); } };

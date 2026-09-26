@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react';
-import type { HealthInfo } from 'contracts';
-import { fetchHealth } from './api';
+import { useCallback, useEffect, useState } from 'react';
+import type { BalanceResponse, HealthInfo, UserInfo } from 'contracts';
+import { fetchBalance, fetchHealth, fetchMe } from './api';
+import { AuthPanel } from './components/AuthPanel';
 import { TaskCreateForm } from './components/TaskCreateForm';
 import { TaskList } from './components/TaskList';
 import { TaskDetail } from './components/TaskDetail';
@@ -21,7 +22,27 @@ function useTaskIdFromHash(): string | null {
 export default function App() {
   const [health, setHealth] = useState<HealthInfo | null>(null);
   const [down, setDown] = useState(false);
+  const [user, setUser] = useState<UserInfo | null>(null);
+  const [balance, setBalance] = useState<BalanceResponse | null>(null);
   const activeTaskId = useTaskIdFromHash();
+
+  // 登录态变化（或任务创建扣费后）刷新余额；未登录清空
+  const refreshBalance = useCallback((u: UserInfo | null) => {
+    if (!u) {
+      setBalance(null);
+      return;
+    }
+    fetchBalance()
+      .then(setBalance)
+      .catch(() => setBalance(null));
+  }, []);
+
+  // 任务终态结算（释放预留）后刷新余额；未登录时 401 静默清空
+  const refreshBalanceOnSettled = useCallback(() => {
+    fetchBalance()
+      .then(setBalance)
+      .catch(() => setBalance(null));
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -42,6 +63,21 @@ export default function App() {
       clearInterval(timer);
     };
   }, []);
+
+  // 启动时恢复会话（HttpOnly Cookie；服务端返回 user: null 即未登录）
+  useEffect(() => {
+    let cancelled = false;
+    fetchMe()
+      .then(({ user: u }) => {
+        if (cancelled) return;
+        setUser(u);
+        refreshBalance(u);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [refreshBalance]);
 
   const badgeText = down
     ? 'API 未连接'
@@ -67,11 +103,32 @@ export default function App() {
       </header>
 
       <main>
+        <AuthPanel
+          user={user}
+          balance={balance}
+          onUserChange={(u) => {
+            setUser(u);
+            refreshBalance(u);
+          }}
+          onBalanceRefresh={refreshBalanceOnSettled}
+        />
         {activeTaskId ? (
-          <TaskDetail id={activeTaskId} onBack={backHome} onOpenTask={openTask} />
+          <TaskDetail
+            id={activeTaskId}
+            onBack={backHome}
+            onOpenTask={openTask}
+            onSettled={refreshBalanceOnSettled}
+          />
         ) : (
           <>
-            <TaskCreateForm onCreated={openTask} />
+            <TaskCreateForm
+              user={user}
+              balance={balance}
+              onCreated={(id) => {
+                openTask(id);
+                refreshBalance(user); // live 创建即扣预留，刷新余额展示
+              }}
+            />
             <TaskList onOpen={openTask} />
           </>
         )}

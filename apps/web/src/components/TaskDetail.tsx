@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
-import type { Task, TaskEvent, TaskStatus } from 'contracts';
-import { cancelTask, fetchTask, fetchTaskEvents, retryTask, streamTaskEvents } from '../api';
+import type { LedgerEntryInfo, Task, TaskEvent, TaskStatus } from 'contracts';
+import { cancelTask, fetchTask, fetchTaskEvents, fetchTaskLedger, retryTask, streamTaskEvents } from '../api';
 import { StatusBadge } from './StatusBadge';
 import { EventTimeline } from './EventTimeline';
 
@@ -8,9 +8,18 @@ import { EventTimeline } from './EventTimeline';
  * 任务详情：先全量回放持久化事件（刷新 / 断线后数据一致的来源），
  * 任务未终态时再从最大 seq 续接 SSE 实时流；事件按 seq 幂等合并，
  * EventSource 自动重连导致的重复投递会被直接忽略。
+ * P5：终态后展示扣费明细（账本条目），并通知上层刷新余额（结算释放预留）。
  */
 
 const TERMINAL_STATUS = new Set<TaskStatus>(['completed', 'failed', 'canceled']);
+
+const LEDGER_KIND_LABEL: Record<LedgerEntryInfo['kind'], string> = {
+  reserve: '预算预留',
+  actual: '实际扣费',
+  settle: '释放预留',
+  topup: '充值',
+  refund: '退款',
+};
 
 /** 终态事件 → 任务状态映射（收到终态事件后无需再拉快照） */
 function statusOfTerminalEvent(event: TaskEvent): TaskStatus {
@@ -23,16 +32,40 @@ export function TaskDetail({
   id,
   onBack,
   onOpenTask,
+  onSettled,
 }: {
   id: string;
   onBack: () => void;
   onOpenTask: (id: string) => void;
+  onSettled?: () => void;
 }) {
   const [task, setTask] = useState<Task | null>(null);
   const [events, setEvents] = useState<Map<number, TaskEvent>>(new Map());
+  const [ledger, setLedger] = useState<LedgerEntryInfo[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [actionPending, setActionPending] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+
+  // 扣费明细：登录用户的任务才有账本条目（401/404 静默隐藏；demo 任务为空）
+  useEffect(() => {
+    let cancelled = false;
+    fetchTaskLedger(id)
+      .then(({ entries }) => {
+        if (!cancelled) setLedger(entries);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [id]);
+
+  const handleTerminal = () => {
+    // 终态：结算释放预留 → 通知上层刷新余额；同时拉取最终扣费明细
+    onSettled?.();
+    fetchTaskLedger(id)
+      .then(({ entries }) => setLedger(entries))
+      .catch(() => undefined);
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -75,6 +108,7 @@ export function TaskDetail({
                     if (!cancelled) setTask(t);
                   })
                   .catch(() => undefined);
+                handleTerminal(); // 结算释放预留 → 刷新余额与扣费明细
                 closeStream?.();
               }
             },
@@ -164,6 +198,7 @@ export function TaskDetail({
           <div className="detail-meta">
             <span>模式：{task.mode}</span>
             <span>模型：{task.modelId}</span>
+            {task.priceVersion !== null && <span>价格版本：{task.priceVersion}</span>}
             {(task.usage.promptTokens > 0 || task.usage.completionTokens > 0) && (
               <span>
                 用量：输入 {task.usage.promptTokens} / 输出 {task.usage.completionTokens} tokens
@@ -195,6 +230,28 @@ export function TaskDetail({
             )}
           </div>
           {actionError && <p className="form-error">{actionError}</p>}
+          {ledger !== null && ledger.length > 0 && (
+            <div className="ledger-box">
+              <h3>扣费明细</h3>
+              <ul className="ledger-list">
+                {ledger.map((entry) => (
+                  <li key={entry.id}>
+                    <span className={`ledger-kind ledger-kind-${entry.kind}`}>
+                      {LEDGER_KIND_LABEL[entry.kind]}
+                    </span>
+                    <span className={entry.amountCny >= 0 ? 'ledger-in' : 'ledger-out'}>
+                      {entry.amountCny >= 0 ? '+' : '−'}¥{Math.abs(entry.amountCny).toFixed(4)}
+                    </span>
+                    {entry.memo && <span className="ledger-memo">{entry.memo}</span>}
+                    <span className="ledger-time">
+                      {new Date(entry.createdAt).toLocaleString('zh-CN', { hour12: false })}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+              <p className="hint">最终以供应商实际用量按记账时价格版本结算；重复回调不重复入账</p>
+            </div>
+          )}
           <div className="timeline-wrap">
             <EventTimeline events={ordered} />
           </div>

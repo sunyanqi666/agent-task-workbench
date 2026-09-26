@@ -1,10 +1,15 @@
 import type {
   ApiError,
+  AuthResponse,
+  BalanceResponse,
   CreateTaskInput,
   HealthInfo,
+  MeResponse,
   ModelListResponse,
+  PaymentResponse,
   Task,
   TaskEvent,
+  TaskLedgerResponse,
   TaskListResponse,
 } from 'contracts';
 
@@ -37,6 +42,31 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T;
 }
 
+/** 无响应体请求（如 204 登出）：只关心成功与否 */
+async function requestEmpty(url: string, init?: RequestInit): Promise<void> {
+  const res = await fetch(url, init);
+  if (!res.ok) {
+    let code = 'network_error';
+    let message = `请求失败（${res.status}）`;
+    try {
+      const body = (await res.json()) as ApiError;
+      code = body.error.code;
+      message = body.error.message;
+    } catch {
+      // 非 JSON 错误体：保留默认文案
+    }
+    throw new ApiClientError(res.status, code, message);
+  }
+}
+
+function postJson(body: unknown): RequestInit {
+  return {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  };
+}
+
 export async function fetchHealth(): Promise<HealthInfo> {
   return request<HealthInfo>('/api/v1/health');
 }
@@ -47,11 +77,39 @@ export async function fetchModels(): Promise<ModelListResponse> {
 }
 
 export async function createTask(input: CreateTaskInput): Promise<Task> {
-  return request<Task>('/api/v1/tasks', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(input),
-  });
+  return request<Task>('/api/v1/tasks', postJson(input));
+}
+
+// ===== 认证与额度（P5） =====
+
+export async function fetchMe(): Promise<MeResponse> {
+  return request<MeResponse>('/api/v1/auth/me');
+}
+
+export async function registerUser(username: string, password: string): Promise<AuthResponse> {
+  return request<AuthResponse>('/api/v1/auth/register', postJson({ username, password }));
+}
+
+export async function loginUser(username: string, password: string): Promise<AuthResponse> {
+  return request<AuthResponse>('/api/v1/auth/login', postJson({ username, password }));
+}
+
+export async function logoutUser(): Promise<void> {
+  return requestEmpty('/api/v1/auth/logout', { method: 'POST' });
+}
+
+export async function fetchBalance(): Promise<BalanceResponse> {
+  return request<BalanceResponse>('/api/v1/me/balance');
+}
+
+/** 模拟支付充值（P5 支付测试环境）：paymentId 幂等，重复回调不重复入账 */
+export async function mockTopup(amountCny: number, paymentId: string): Promise<PaymentResponse> {
+  return request<PaymentResponse>('/api/v1/payments/mock-topup', postJson({ amountCny, paymentId }));
+}
+
+/** 任务扣费明细（P5 账本）：reserve/actual/settle 条目 */
+export async function fetchTaskLedger(id: string): Promise<TaskLedgerResponse> {
+  return request<TaskLedgerResponse>(`/api/v1/tasks/${id}/ledger`);
 }
 
 export async function fetchTasks(limit = 20, offset = 0): Promise<TaskListResponse> {

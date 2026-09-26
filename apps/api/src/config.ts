@@ -24,6 +24,8 @@ export interface AppConfig {
   userCreateRatePerMinute: number;
   /** 单任务预估费用上限（元）：预估超过该值的 live 任务拒绝创建 */
   maxTaskBudgetCny: number;
+  /** 平台当日净流出告警阈值（元）：超过仅告警不阻断；<= 0 关闭 */
+  platformDailyBudgetCny: number;
   /** demo 模型每步之间的固定延迟：让执行过程在 SSE 实时流中可见；0 表示立即执行 */
   demoStepDelayMs: number;
   /** Fastify 日志开关（测试时关闭避免噪音） */
@@ -88,6 +90,7 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     maxUserConcurrentTasks: intEnv('MAX_USER_CONCURRENT_TASKS', 5),
     userCreateRatePerMinute: intEnv('USER_CREATE_RATE_PER_MINUTE', 10),
     maxTaskBudgetCny: floatEnv('MAX_TASK_BUDGET_CNY', 10),
+    platformDailyBudgetCny: floatEnv('PLATFORM_DAILY_BUDGET_CNY', 50),
     demoStepDelayMs: intEnv('DEMO_STEP_DELAY_MS', 400),
     logger: true,
     ...overrides,

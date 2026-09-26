@@ -453,3 +453,134 @@ form select:focus {
   font-size: 12px;
   text-align: center;
 }
+
+/* ===== P5 账号 / 额度 / 扣费明细 ===== */
+.hint {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.auth-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.auth-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.auth-form {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.auth-form input {
+  flex: 1 1 180px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 14px;
+}
+
+.auth-buttons {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.topup-input {
+  width: 140px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 14px;
+}
+
+.form-cost {
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+  flex-wrap: wrap;
+  margin-top: 8px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.form-warn {
+  color: #b45309;
+  font-size: 13px;
+}
+
+.ledger-box {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fafafa;
+}
+
+.ledger-box h3 {
+  margin: 0 0 8px;
+  font-size: 14px;
+}
+
+.ledger-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ledger-list li {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  flex-wrap: wrap;
+  font-size: 13px;
+}
+
+.ledger-kind {
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  background: #eef2ff;
+  color: #4338ca;
+  white-space: nowrap;
+}
+
+.ledger-kind-settle,
+.ledger-kind-topup {
+  background: #ecfdf5;
+  color: #047857;
+}
+
+.ledger-in {
+  color: #047857;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.ledger-out {
+  color: #b91c1c;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.ledger-memo {
+  color: var(--muted);
+}
+
+.ledger-time {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}

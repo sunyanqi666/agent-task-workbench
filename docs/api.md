@@ -6,7 +6,7 @@
 
 - 统一前缀 `/api/v1`，请求 / 响应均为 JSON（SSE 除外）。
 - 错误响应统一为 `{ "error": { "code": string, "message": string, "requestId": string } }`。
-- 所有输入在服务端校验：无效输入返回 400，找不到返回 404，状态冲突返回 409，非预期错误返回 500（不泄露密钥或堆栈）。
+- 所有输入在服务端校验：无效输入返回 400，无余额返回 402，超限（并发 / 频率）返回 429，找不到返回 404，状态冲突返回 409，非预期错误返回 500（不泄露密钥或堆栈）。
 - 时间一律 ISO 8601 字符串。
 - 开发模式下前端通过 Vite 代理访问 `/api/v1`（5173 → 3000），避免硬编码跨域地址。
 
@@ -15,14 +15,22 @@
 | 方法 | 路径 | 说明 | 实现阶段 |
 | --- | --- | --- | --- |
 | GET | `/api/v1/health` | 服务状态、版本；不暴露配置或密钥 | P0 ✅ |
-| GET | `/api/v1/models` | 服务端受控模型目录（id + label） | P4 ✅ |
+| GET | `/api/v1/models` | 服务端受控模型目录 + 各模型单任务预估费用上限 | P4 ✅ |
 | POST | `/api/v1/tasks` | 创建任务（可选 `modelId`），返回 201 与任务对象；live 未配置返回 503 | P1 ✅ |
 | GET | `/api/v1/tasks?limit=&offset=` | 按创建时间倒序分页查询（limit 1..100，默认 20） | P1 ✅ |
 | GET | `/api/v1/tasks/:id` | 获取任务快照 | P1 ✅ |
 | GET | `/api/v1/tasks/:id/events?afterSeq=n` | 获取持久化事件以供回放（默认 afterSeq=0） | P1 ✅ |
 | GET | `/api/v1/tasks/:id/stream` | SSE 推送新事件；事件 ID 使用 `seq`，支持从上次序号续接 | P2 ✅ |
+| GET | `/api/v1/tasks/:id/ledger` | 该任务的扣费明细（账本条目，按时间升序；demo 为空列表） | P5 ✅ |
 | POST | `/api/v1/tasks/:id/cancel` | 请求取消；终态重复操作保持幂等 | P3 ✅ |
 | POST | `/api/v1/tasks/:id/retry` | 创建新任务并关联原任务（`parentTaskId`，沿用原任务模型） | P3 ✅ |
+| POST | `/api/v1/auth/register` | 注册并登录（HttpOnly Cookie 会话） | P5 ✅ |
+| POST | `/api/v1/auth/login` | 登录 | P5 ✅ |
+| POST | `/api/v1/auth/logout` | 登出（204） | P5 ✅ |
+| GET | `/api/v1/auth/me` | 当前登录用户；未登录返回 `{ user: null }` | P5 ✅ |
+| GET | `/api/v1/me/balance` | 余额与进行中任务预留合计；未登录 401 | P5 ✅ |
+| POST | `/api/v1/payments/mock-topup` | 模拟充值回调（登录后）；按 `paymentId` 幂等 | P5 ✅ |
+| POST | `/api/v1/payments/refund` | 退款（登录后）；累计不超原充值，重放幂等 | P5 ✅ |
 
 ### 示例（P1/P2 已实现端点）
 
@@ -45,6 +53,36 @@ curl -X POST "http://localhost:3000/api/v1/tasks/<id>/cancel"
 
 # 重试失败/已取消任务 → 201 新任务（parentTaskId 关联原任务）
 curl -X POST "http://localhost:3000/api/v1/tasks/<id>/retry"
+```
+
+### 示例（P5 账号 / 账本 / 支付）
+
+```bash
+# 注册（成功即登录，后续请求携带 HttpOnly Cookie）
+curl -c jar.txt -X POST http://localhost:3000/api/v1/auth/register \
+  -H 'content-type: application/json' \
+  -d '{"username": "alice", "password": "password123"}'
+
+# 模拟充值回调（paymentId 幂等，重复回调 recorded=false）
+curl -b jar.txt -X POST http://localhost:3000/api/v1/payments/mock-topup \
+  -H 'content-type: application/json' \
+  -d '{"paymentId": "ch_001", "amountCny": 10.5}'
+# → 200 {"recorded": true, "balanceCny": 10.5}
+
+# 创建 live 任务：按预估上限预留（余额不足 402）
+curl -b jar.txt -X POST http://localhost:3000/api/v1/tasks \
+  -H 'content-type: application/json' \
+  -d '{"prompt": "计算 7*6 的结果", "mode": "live", "modelId": "deepseek-flash"}'
+
+# 余额 / 扣费明细
+curl -b jar.txt http://localhost:3000/api/v1/me/balance
+curl -b jar.txt http://localhost:3000/api/v1/tasks/<id>/ledger
+# → {"entries": [{"kind": "reserve|actual|settle|topup|refund", "amountCny": -0.48, …}]}
+
+# 退款（累计不超原充值，重放幂等）
+curl -b jar.txt -X POST http://localhost:3000/api/v1/payments/refund \
+  -H 'content-type: application/json' \
+  -d '{"paymentId": "ch_001", "amountCny": 4}'
 ```
 
 创建后事件序列（demo 表达式任务）：
@@ -86,7 +124,40 @@ curl -X POST "http://localhost:3000/api/v1/tasks/<id>/retry"
 - **用量记录**：live 模型每次响应中供应商返回的 `usage`（`prompt_tokens` / `completion_tokens`）累加到任务行（`tasks.prompt_tokens` / `tasks.completion_tokens`），任务快照以 `usage: { promptTokens, completionTokens }` 返回；demo 任务恒为 0。用量是任务行事实而非过程事件，不进入事件流。
 - **推理模式**：两个模型均默认开启思考模式，响应含 `reasoning_content`（思维链）。带工具调用的轮次，适配器会把思维链在后续所有请求中随 assistant 消息传回（DeepSeek 要求，缺失返回 400）；无工具调用的轮次不传回（API 会忽略）。
 - **多工具调用**：一次响应可返回多个 `tool_calls`，运行器逐个执行（每个调用产生 `tool.started` + `tool.completed`/`tool.failed` 事件对），结果按序回传——assistant 消息声明全部调用，每个调用对应一条 `tool` 结果消息（id 确定性生成并成对）；任一调用参数非法则整轮失败，避免部分执行。
-- 账号、额度与费用控制（P5）建立在这条链路之上：当前 live 接口无用户隔离与费用限制，公开部署前必须补上。
+- 账号、额度与费用控制（P5）建立在这条链路之上，见下节。
+
+### 账号、额度与用量账本（P5）
+
+**账号归属**：任务归属于创建者（登录用户）；未登录只能创建 demo 任务，live 任务要求登录（未登录 401）。所有权校验覆盖快照 / 事件 / 流 / 取消 / 重试 / 扣费明细：匿名访问用户任务与访问不存在的任务同样返回 404（不泄露存在性）。
+
+**额度与限额（创建 / 重试时的路由层校验）**：
+
+- 余额校验：live 预估费用上限超过当前余额 → 402 `insufficient_balance`；
+- 单任务预算：预估上限超过 `MAX_TASK_BUDGET_CNY`（默认 10 元）→ 400；
+- 并发与频控：进行中任务数超 `MAX_USER_CONCURRENT_TASKS`、创建频率超 `USER_CREATE_RATE_PER_MINUTE` → 429；
+- 限额对 demo 模式不生效（不计费）。
+
+**用量账本（`ledger_entries`，唯一读写入口 `ledgerService`）**：
+
+| 类型 | 方向 | 语义 | biz_key（幂等键） |
+| --- | --- | --- | --- |
+| `reserve` | −R | 创建 / 重试 live 任务时扣预留（R = 预估费用上限） | `reserve:{taskId}` |
+| `actual` | −A | 每次模型响应按真实 usage 扣费；用量缺失（解析失败等）按每步估算兜底归集 | `actual:{taskId}:{step}` |
+| `settle` | +R | 任务终态释放全部预留（状态机事务内触发，重启恢复同样覆盖） | `settle:{taskId}` |
+| `topup` | +X | 充值入账（仅服务端验证后的回调） | `topup:{paymentId}` |
+| `refund` | −X | 退款出账 | `refund:{paymentId}:{amount}` |
+
+- 净扣恒等于 Σactual（预留只是占用，结算原路释放），不存在重复扣费路径；每条记录固化 `price_version`（如 `2026-09-26.1`）与 `balance_after` 余额快照，目录调价时递增 `MODEL_PRICE_VERSION`。
+- 余额口径：`topup + refund + settle + actual` 的累计和（`GET /api/v1/me/balance`），进行中任务的预留单独返回 `reservedCny`。
+- 任务详情页展示扣费明细（`GET /api/v1/tasks/:id/ledger`）；价格版本随任务快照返回（`priceVersion`）。
+
+**支付测试环境（mock）**：
+
+- `POST /api/v1/payments/mock-topup`：模拟「服务端验证后的支付成功回调」，`paymentId` 幂等——重复回调返回 `{ recorded: false }` 不重复入账；金额必须为正数（分精度，四舍五入到分）、单笔 ≤ 10000 元，非法金额 400 不入账（失败路径演练）。
+- `POST /api/v1/payments/refund`：必须引用本用户的一笔充值（否则 404）；分笔退款累计不得超过原充值（400 `refund_exceeds_topup`）；同一通知重放（同 `paymentId` 同金额）幂等跳过。
+- 真实支付接入时，把 mock 回调替换为带签名验证的服务端对服务端回调即可，入账语义（biz_key 幂等）不变。
+
+**运营保护**：工具白名单与 `MAX_STEPS` / `MAX_TOOL_CALLS_PER_TURN` / `STEP_TIMEOUT_MS`（P1-P3）+ 单任务预算与用户限额（P5）+ 平台日预算告警 `PLATFORM_DAILY_BUDGET_CNY`（默认 50 元；当日 reserve+actual 净流出超阈值仅告警不阻断）+ 对账测试（预留/扣费/释放/充值/退款在测试中逐笔核对）。前端创建 live 任务时展示预估费用上限、当前余额与「模型供应商将处理任务内容」提示。
 
 ### 启动恢复（P4）
 

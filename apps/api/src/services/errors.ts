@@ -48,3 +48,10 @@ export class QuotaExceededError extends AppError {
     super(message, 429, code);
   }
 }
+
+/** 余额不足以支付单任务预留 → 402 */
+export class InsufficientBalanceError extends AppError {
+  constructor(message = '余额不足') {
+    super(message, 402, 'insufficient_balance');
+  }
+}

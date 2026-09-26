@@ -5,13 +5,13 @@ import { AVAILABLE_MODELS } from 'contracts';
 import { makeApp, waitForTerminal } from '../testing';
 import { createTask, transitionTask } from '../services/taskService';
 
-test('模型目录：GET /api/v1/models 返回受控列表（两个 DeepSeek 模型）', async (t) => {
+test('模型目录：GET /api/v1/models 返回受控列表与预估费用上限（两个 DeepSeek 模型）', async (t) => {
   const { app, cleanup } = await makeApp();
   t.after(cleanup);
 
   const res = await app.inject({ method: 'GET', url: '/api/v1/models' });
   assert.equal(res.statusCode, 200);
-  const { models } = res.json() as ModelListResponse;
+  const { models, estimateMaxCny } = res.json() as ModelListResponse;
   assert.deepEqual(models, [
     {
       id: 'deepseek-flash',
@@ -25,6 +25,9 @@ test('模型目录：GET /api/v1/models 返回受控列表（两个 DeepSeek 模
     },
   ]);
   assert.deepEqual(models, AVAILABLE_MODELS);
+  // 预估上限按服务端 MAX_STEPS（测试默认 20）计算：flash 0.48 元、pro 4.8 元
+  assert.equal(estimateMaxCny['deepseek-flash'], 0.48);
+  assert.equal(estimateMaxCny['deepseek-v4-pro'], 4.8);
 });
 
 test('创建任务：合法 modelId 固化到任务；缺省为 deepseek-flash', async (t) => {

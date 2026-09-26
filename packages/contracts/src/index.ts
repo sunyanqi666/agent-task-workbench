@@ -104,6 +104,8 @@ export interface Task {
   mode: ModelMode;
   /** 创建时固化的模型 id（来自 AVAILABLE_MODELS；重试沿用原任务选择） */
   modelId: string;
+  /** 创建时固化的价格版本（live 任务）；demo / 历史任务为 null */
+  priceVersion: string | null;
   /** 供应商返回的累计用量；随每次模型响应累加 */
   usage: TaskUsage;
   /** 重试产生的新任务指向原任务 id；首次创建为 null */
@@ -231,6 +233,47 @@ export interface MeResponse {
   user: UserInfo | null;
 }
 
+// ===== 用量账本（P5） =====
+/**
+ * 价格版本：目录价格变更时递增。任务创建时固化到任务行，账本记账沿用，
+ * 保证历史任务的预估与结算口径可追溯（当前单版本期间等价于全量固化）。
+ */
+export const MODEL_PRICE_VERSION = '2026-09-26.1';
+
+/** GET /api/v1/me/balance 响应：余额（元，已扣除预留与实际消耗）与进行中任务的预留合计 */
+export interface BalanceResponse {
+  balanceCny: number;
+  reservedCny: number;
+}
+
+/** 账本条目类型：reserve 预留 / actual 实际扣费 / settle 释放预留 / topup 充值 / refund 退款 */
+export type LedgerKind = 'reserve' | 'actual' | 'settle' | 'topup' | 'refund';
+
+/** 账本条目（P5 用量账本）：amountCny 正 = 入账，负 = 出账；bizKey 唯一防重复记账 */
+export interface LedgerEntryInfo {
+  id: string;
+  userId: string;
+  kind: LedgerKind;
+  taskId: string | null;
+  amountCny: number;
+  balanceAfterCny: number;
+  priceVersion: string | null;
+  bizKey: string;
+  memo: string | null;
+  createdAt: string;
+}
+
+/** GET /api/v1/tasks/:id/ledger 响应：该任务的扣费明细（按时间升序） */
+export interface TaskLedgerResponse {
+  entries: LedgerEntryInfo[];
+}
+
+/** POST /api/v1/payments/* 响应：recorded=false 表示重复通知幂等跳过（不重复入账） */
+export interface PaymentResponse {
+  recorded: boolean;
+  balanceCny: number;
+}
+
 // ===== 任务 API 契约（P1） =====
 /** prompt 长度上限：服务端与前端共用 */
 export const PROMPT_MAX_LENGTH = 8000;
@@ -248,6 +291,8 @@ export interface CreateTaskInput {
 /** GET /api/v1/models 响应：服务端受控模型目录 */
 export interface ModelListResponse {
   models: ModelInfo[];
+  /** 各模型按服务端当前 MAX_STEPS 计算的单任务预估费用上限（元），key = modelId；live 创建时按此预留 */
+  estimateMaxCny: Record<string, number>;
 }
 
 /** GET /api/v1/tasks 响应：按创建时间倒序分页 */

@@ -1,16 +1,23 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { CreateTaskInput, TaskEvent, TaskEventType } from 'contracts';
-import { AVAILABLE_MODELS, DEFAULT_MODEL_ID, PROMPT_MAX_LENGTH } from 'contracts';
+import { AVAILABLE_MODELS, DEFAULT_MODEL_ID, MODEL_PRICE_VERSION, PROMPT_MAX_LENGTH } from 'contracts';
 import { AppError, ConflictError, NotFoundError, UnauthorizedError, ValidationError } from '../services/errors';
 import {
   createTask,
+  deleteQueuedTask,
   getEvents,
   getOwnedTask,
   listTasks,
+  setReservedCny,
   taskOwnedBy,
   transitionTask,
 } from '../services/taskService';
 import { assertCanCreateTask } from '../services/quotaService';
+import {
+  getEntriesByTask,
+  reserveForTask,
+  warnIfPlatformBudgetExceeded,
+} from '../services/ledgerService';
 import { getUserFromRequest } from '../services/authService';
 import { subscribeTaskEvents } from '../services/eventBus';
 import { getCancelController } from '../runner/cancelRegistry';
@@ -84,20 +91,40 @@ export function registerTaskRoutes(app: FastifyInstance, deps: RunnerDeps): void
         'live_model_not_configured',
       );
     }
-    // P5 额度与限额：并发 / 频率 / 单任务预算（仅登录用户；估算与预留见 quotaService）
-    if (user) {
-      assertCanCreateTask(deps.db, user.id, {
-        mode: input.mode ?? 'demo',
-        modelId: input.modelId ?? DEFAULT_MODEL_ID,
-        maxSteps: deps.maxSteps,
-        limits: {
-          maxConcurrent: deps.maxUserConcurrentTasks,
-          ratePerMinute: deps.userCreateRatePerMinute,
-          maxTaskBudgetCny: deps.maxTaskBudgetCny,
-        },
-      });
+    // P5 额度与限额：并发 / 频率 / 单任务预算（仅登录用户；返回 live 预估上限供预留）
+    const estimateCny = user
+      ? assertCanCreateTask(deps.db, user.id, {
+          mode: input.mode ?? 'demo',
+          modelId: input.modelId ?? DEFAULT_MODEL_ID,
+          maxSteps: deps.maxSteps,
+          limits: {
+            maxConcurrent: deps.maxUserConcurrentTasks,
+            ratePerMinute: deps.userCreateRatePerMinute,
+            maxTaskBudgetCny: deps.maxTaskBudgetCny,
+          },
+        })
+      : null;
+    const task = createTask(deps.db, {
+      ...input,
+      userId: user?.id ?? null,
+      ...(estimateCny !== null ? { priceVersion: MODEL_PRICE_VERSION } : {}),
+    });
+    // 预留制（P5 账本）：live 任务创建即扣预估上限，终态结算释放；失败则补偿删除不留悬挂任务
+    if (estimateCny !== null && user) {
+      try {
+        reserveForTask(
+          deps.db,
+          { taskId: task.id, userId: user.id, modelId: task.modelId, priceVersion: task.priceVersion },
+          estimateCny,
+        );
+      } catch (err) {
+        deleteQueuedTask(deps.db, task.id);
+        throw err;
+      }
+      setReservedCny(deps.db, task.id, estimateCny);
+      // 运营保护：平台当日净流出告警（仅告警不阻断，阈值 <= 0 关闭）
+      warnIfPlatformBudgetExceeded(deps.db, deps.platformDailyBudgetCny);
     }
-    const task = createTask(deps.db, { ...input, userId: user?.id ?? null });
     void runTask(deps, task.id); // 异步执行，不阻塞 201 响应
     reply.code(201);
     return task;
@@ -128,6 +155,14 @@ export function registerTaskRoutes(app: FastifyInstance, deps: RunnerDeps): void
     const user = getUserFromRequest(deps.db, request);
     if (!taskOwnedBy(deps.db, id, user?.id ?? null)) throw new NotFoundError(`任务不存在：${id}`);
     return { events: getEvents(deps.db, id, afterSeq) };
+  });
+
+  // 扣费明细（P5 账本）：该任务的 reserve/actual/settle 条目（按时间升序）；demo 任务为空列表
+  app.get('/api/v1/tasks/:id/ledger', async (request: FastifyRequest) => {
+    const { id } = request.params as { id: string };
+    const user = getUserFromRequest(deps.db, request);
+    if (!taskOwnedBy(deps.db, id, user?.id ?? null)) throw new NotFoundError(`任务不存在：${id}`);
+    return { entries: getEntriesByTask(deps.db, id) };
   });
 
   // SSE 实时事件流：先回放 afterSeq 之后的持久化事件，再订阅新事件直至终态。
@@ -250,27 +285,42 @@ export function registerTaskRoutes(app: FastifyInstance, deps: RunnerDeps): void
     if (task.mode === 'live' && !deps.liveModel) {
       throw new AppError('真实模型未配置，无法重试 live 任务', 503, 'live_model_not_configured');
     }
-    // 重试同样受额度与限额约束（重试产生新任务，与创建同口径）
-    if (task.userId) {
-      assertCanCreateTask(deps.db, task.userId, {
-        mode: task.mode,
-        modelId: task.modelId,
-        maxSteps: deps.maxSteps,
-        limits: {
-          maxConcurrent: deps.maxUserConcurrentTasks,
-          ratePerMinute: deps.userCreateRatePerMinute,
-          maxTaskBudgetCny: deps.maxTaskBudgetCny,
-        },
-      });
-    }
-
+    // 重试同样受额度与限额约束（重试产生新任务，与创建同口径）；live 重试同样预留
+    const estimateCny = task.userId
+      ? assertCanCreateTask(deps.db, task.userId, {
+          mode: task.mode,
+          modelId: task.modelId,
+          maxSteps: deps.maxSteps,
+          limits: {
+            maxConcurrent: deps.maxUserConcurrentTasks,
+            ratePerMinute: deps.userCreateRatePerMinute,
+            maxTaskBudgetCny: deps.maxTaskBudgetCny,
+          },
+        })
+      : null;
     const retry = createTask(deps.db, {
       prompt: task.prompt,
       mode: task.mode,
       modelId: task.modelId, // 重试沿用原任务创建时固化的模型选择
       parentTaskId: task.id,
       userId: task.userId, // 归属随原任务（请求者必为归属者，见上方归属校验）
+      ...(estimateCny !== null ? { priceVersion: MODEL_PRICE_VERSION } : {}),
     });
+    if (estimateCny !== null && task.userId) {
+      try {
+        reserveForTask(
+          deps.db,
+          { taskId: retry.id, userId: task.userId, modelId: retry.modelId, priceVersion: retry.priceVersion },
+          estimateCny,
+        );
+      } catch (err) {
+        deleteQueuedTask(deps.db, retry.id);
+        throw err;
+      }
+      setReservedCny(deps.db, retry.id, estimateCny);
+      // 运营保护：与创建同口径的当日净流出告警
+      warnIfPlatformBudgetExceeded(deps.db, deps.platformDailyBudgetCny);
+    }
     void runTask(deps, retry.id);
     reply.code(201);
     return retry;

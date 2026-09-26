@@ -3,6 +3,7 @@ import type { TaskEventPayloads, ToolResult } from 'contracts';
 import type { ToolRegistry } from '../tools';
 import { validateToolInput } from '../tools';
 import { appendEvent, getTask, recordModelUsage, transitionTask } from '../services/taskService';
+import { recordActualUsage, type TaskSettlementInfo } from '../services/ledgerService';
 import type { ModelAction, ModelAdapter, ModelToolCall, StepRecord } from './model';
 import { registerCancel, unregisterCancel } from './cancelRegistry';
 
@@ -28,6 +29,8 @@ export interface RunnerDeps {
   maxUserConcurrentTasks: number;
   userCreateRatePerMinute: number;
   maxTaskBudgetCny: number;
+  /** 平台当日净流出告警阈值（元），创建 / 重试预留后检查；<= 0 关闭 */
+  platformDailyBudgetCny: number;
 }
 
 /** 协作式取消的内部信号：工具执行中途被取消时跳过事件写入，由运行器统一转终态 */
@@ -69,6 +72,12 @@ export async function runTask(deps: RunnerDeps, taskId: string): Promise<void> {
       return;
     }
 
+    // P5 账本：live 任务逐次记账的事实来源（demo 无供应商成本，不入账）
+    const ledgerInfo: TaskSettlementInfo | null =
+      task.mode === 'live' && task.userId
+        ? { taskId, userId: task.userId, modelId: task.modelId, priceVersion: task.priceVersion }
+        : null;
+
     const history: StepRecord[] = [];
     for (let step = 0; step < maxSteps; step++) {
       // 步间取消检查：信号触发，或任务已被外部直接落终态（无控制器的窗口）
@@ -86,15 +95,19 @@ export async function runTask(deps: RunnerDeps, taskId: string): Promise<void> {
           transitionTask(db, taskId, { to: 'canceled' });
           return;
         }
+        // 用量归集兜底：调用失败时供应商成本可能已发生但用量未知，按每步估算上限扣费
+        if (ledgerInfo) recordActualUsage(db, ledgerInfo, step, null);
         transitionTask(db, taskId, {
           to: 'failed',
           errorCode: 'model_error',
           message: `模型调用失败：${errorMessage(err)}`,
         });
         return;
-    }
+      }
       // 供应商返回的用量：真实发生的成本，取消前的响应也计入任务行
       if (action.usage) recordModelUsage(db, taskId, action.usage);
+      // 账本：有真实用量按实际扣费；响应解析成功但用量缺失时按每步估算兜底
+      if (ledgerInfo) recordActualUsage(db, ledgerInfo, step, action.usage ?? null);
       if (controller.signal.aborted) {
         // 模型返回后、写事件前被取消：事件不落库，直接转终态
         transitionTask(db, taskId, { to: 'canceled' });
