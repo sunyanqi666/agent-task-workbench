@@ -65,6 +65,7 @@ export async function buildServer(
     userCreateRatePerMinute: config.userCreateRatePerMinute,
     maxTaskBudgetCny: config.maxTaskBudgetCny,
     platformDailyBudgetCny: config.platformDailyBudgetCny,
+    platformDailyHardLimitCny: config.platformDailyHardLimitCny,
   };
 
   // 启动恢复：处理上次进程中断遗留的 queued / running 任务，保证不永久停留进行中状态
@@ -78,8 +79,8 @@ export async function buildServer(
 
   registerHealthRoutes(app, db);
   registerModelRoutes(app, config.maxSteps);
-  registerAuthRoutes(app, db);
-  registerPaymentRoutes(app, db);
+  registerAuthRoutes(app, db, config.isProduction);
+  registerPaymentRoutes(app, db, config.mockPaymentsEnabled);
   registerTaskRoutes(app, runner);
 
   app.setNotFoundHandler((request, reply) => {

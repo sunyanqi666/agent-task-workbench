@@ -6,8 +6,8 @@ import {
   ESTIMATED_OUTPUT_TOKENS_PER_STEP,
 } from 'contracts';
 import { AVAILABLE_MODELS, MODEL_PRICE_VERSION } from 'contracts';
-import { queryAll, queryOne } from '../db';
-import { InsufficientBalanceError } from './errors';
+import { queryAll, queryOne, withTransaction } from '../db';
+import { InsufficientBalanceError, QuotaExceededError } from './errors';
 
 /**
  * 用量账本服务（P5）：唯一有权读写 ledger_entries 的模块。
@@ -69,22 +69,10 @@ function stepCostCny(modelId: string, usage: TaskUsage | null): number {
   );
 }
 
-/** 包裹事务：异常时回滚并原样抛出 */
-function transaction<T>(db: DatabaseSync, fn: () => T): T {
-  db.exec('BEGIN');
-  try {
-    const result = fn();
-    db.exec('COMMIT');
-    return result;
-  } catch (err) {
-    db.exec('ROLLBACK');
-    throw err;
-  }
-}
-
 /**
- * 通用记账：在事务内计算余额、插入条目（biz_key 冲突 = 已记账，直接跳过返回 false）。
- * 所有对外语义函数都经过它，保证 balance_after 与金额口径一致。
+ * 通用记账：在可重入事务内计算余额、插入条目（biz_key 冲突 = 已记账，直接跳过返回 false）。
+ * 所有对外语义函数都经过它，保证 balance_after 与金额口径一致；
+ * 被任务服务的外层事务（创建+预留 / 终态+释放）调用时直接参与外层事务。
  */
 function insertEntry(
   db: DatabaseSync,
@@ -98,7 +86,7 @@ function insertEntry(
     memo?: string;
   },
 ): boolean {
-  return transaction(db, () => {
+  return withTransaction(db, () => {
     const existing = queryOne<{ id: string }>(
       db,
       'SELECT id FROM ledger_entries WHERE biz_key = ?',
@@ -357,6 +345,26 @@ export function warnIfPlatformBudgetExceeded(db: DatabaseSync, dailyBudgetCny: n
   if (outflow > dailyBudgetCny) {
     console.warn(
       `[ledger] 平台当日支出 ${outflow.toFixed(2)} 元已超过预算告警阈值 ${dailyBudgetCny.toFixed(2)} 元，请关注对账`,
+    );
+  }
+}
+
+/**
+ * 平台费用硬上限（账本可靠性加固）：当日净流出 + 本次预估超过硬上限时，
+ * 拒绝创建/重试 live 任务（429）。硬上限为平台级兜底，优先级高于用户限额；
+ * <= 0 表示关闭（测试环境默认关闭）。
+ */
+export function assertPlatformDailyBudget(
+  db: DatabaseSync,
+  hardLimitCny: number,
+  additionalCny: number,
+): void {
+  if (hardLimitCny <= 0) return;
+  const outflow = getPlatformOutflowTodayCny(db);
+  if (outflow + additionalCny > hardLimitCny) {
+    throw new QuotaExceededError(
+      `平台当日支出 ${outflow.toFixed(2)} 元，加上本次预估 ${additionalCny.toFixed(2)} 元将超过硬上限 ${hardLimitCny.toFixed(2)} 元，请明日再试`,
+      'platform_daily_budget_exceeded',
     );
   }
 }

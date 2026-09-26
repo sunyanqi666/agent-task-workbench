@@ -12,14 +12,16 @@ import type {
   TaskUsage,
 } from 'contracts';
 import { DEFAULT_MODEL_ID, TASK_STATUS_TRANSITIONS } from 'contracts';
-import { queryAll, queryOne } from '../db';
+import { queryAll, queryOne, withTransaction } from '../db';
 import { ConflictError, NotFoundError } from './errors';
 import { publishTaskEvent } from './eventBus';
-import { settleTask } from './ledgerService';
+import { reserveForTask, settleTask } from './ledgerService';
 
 /**
  * 任务服务：唯一有权读写 tasks / task_events 的模块。
- * 核心不变量：任务状态更新与对应事件追加在同一事务中完成（见 transitionTask）。
+ * 核心不变量：任务状态更新与对应事件追加在同一事务中完成（见 transitionTask）；
+ * 账本一致性不变量：创建+预留、终态+释放均在同一事务（见 createTask / transitionTask），
+ * 任何时刻崩溃都不会留下「有任务无预留」或「终态未释放预留」的中间态。
  * 路由层与运行器都只能通过本模块操作数据，保证状态机不被绕过。
  */
 
@@ -107,19 +109,6 @@ function insertEvent(
   return event;
 }
 
-/** 包裹事务：异常时回滚并原样抛出 */
-function transaction<T>(db: DatabaseSync, fn: () => T): T {
-  db.exec('BEGIN');
-  try {
-    const result = fn();
-    db.exec('COMMIT');
-    return result;
-  } catch (err) {
-    db.exec('ROLLBACK');
-    throw err;
-  }
-}
-
 // ===== 状态迁移 =====
 
 /** 判别联合：目标状态决定事件类型与载荷（task.started / task.completed / task.failed / task.canceled） */
@@ -130,11 +119,13 @@ export type TransitionInput =
   | { to: 'canceled' };
 
 /**
- * 状态迁移：校验状态机 → 更新任务 → 追加对应事件，三步在同一事务。
+ * 状态迁移：校验状态机 → 更新任务 → 追加对应事件 →（终态）释放预留，全部在同一事务。
  * 非法迁移抛 ConflictError(409) 且不产生任何写入（事务回滚）。
+ * 终态结算在同一事务内完成（P5 账本）：崩溃在事务前后都不会留下「已终态但预留未释放」的中间态；
+ * biz_key 幂等保证重放安全。所有终态路径（完成 / 失败 / 取消 / 恢复落终态）都经过此处。
  */
 export function transitionTask(db: DatabaseSync, taskId: string, input: TransitionInput): Task {
-  const { task, settled, event } = transaction(db, () => {
+  const { task, event } = withTransaction(db, () => {
     const row = queryOne<TaskRow>(db, 'SELECT * FROM tasks WHERE id = ?', taskId);
     if (!row) throw new NotFoundError(`任务不存在：${taskId}`);
 
@@ -171,29 +162,30 @@ export function transitionTask(db: DatabaseSync, taskId: string, input: Transiti
       event = insertEvent(db, taskId, 'task.canceled', {});
     }
 
-    return {
-      task: rowToTask(queryOne<TaskRow>(db, 'SELECT * FROM tasks WHERE id = ?', taskId)!),
-      settled: queryOne<{ mode: string; user_id: string | null; price_version: string | null; reserved_cny: number }>(
+    // 终态结算钩子（P5 账本，同一事务）：live 任务到达终态即释放预留
+    if (to !== 'running') {
+      const settled = queryOne<{ mode: string; user_id: string | null; price_version: string | null; reserved_cny: number }>(
         db,
         'SELECT mode, user_id, price_version, reserved_cny FROM tasks WHERE id = ?',
         taskId,
-      )!,
+      )!;
+      if (settled.mode === 'live' && settled.user_id !== null) {
+        settleTask(db, {
+          taskId,
+          userId: settled.user_id,
+          modelId: row.model_id,
+          priceVersion: settled.price_version,
+          reservedCny: settled.reserved_cny,
+        });
+      }
+    }
+
+    return {
+      task: rowToTask(queryOne<TaskRow>(db, 'SELECT * FROM tasks WHERE id = ?', taskId)!),
       event,
     };
   });
   publishTaskEvent(event); // 事务提交成功后再广播，订阅者读到的数据必然已持久化
-
-  // 终态结算钩子（P5 账本）：live 任务到达终态即释放预留，biz_key 幂等。
-  // 所有终态路径（完成 / 失败 / 取消 / 恢复落终态）都经过 transitionTask，此处是唯一结算入口。
-  if (input.to !== 'running' && settled.mode === 'live' && settled.user_id !== null) {
-    settleTask(db, {
-      taskId,
-      userId: settled.user_id,
-      modelId: task.modelId,
-      priceVersion: settled.price_version,
-      reservedCny: settled.reserved_cny,
-    });
-  }
   return task;
 }
 
@@ -204,7 +196,7 @@ export function appendEvent<P extends TaskEventType>(
   type: P,
   payload: TaskEventPayloads[P],
 ): void {
-  const event = transaction(db, () => insertEvent(db, taskId, type, payload));
+  const event = withTransaction(db, () => insertEvent(db, taskId, type, payload));
   publishTaskEvent(event);
 }
 
@@ -296,45 +288,52 @@ export function listUnfinishedTasks(
 
 // ===== 创建 =====
 
-/** 创建任务：插入 queued 任务 + task.created 事件，同一事务；parentTaskId 用于重试关联，userId 为任务归属（null = 匿名），priceVersion 供 live 任务固化记账口径 */
+/**
+ * 创建任务：插入 queued 任务 + task.created 事件 + （live 登录用户）账本预留，同一事务。
+ * parentTaskId 用于重试关联，userId 为任务归属（null = 匿名），priceVersion 供 live 任务固化记账口径。
+ * reserveCny 提供时（登录用户的 live 任务），余额校验与预留条目同事务完成：
+ * 余额不足抛 402 时任务根本不会存在，不存在「创建了任务却没预留」的中间态。
+ */
 export function createTask(
   db: DatabaseSync,
-  input: CreateTaskInput & { parentTaskId?: string; userId?: string | null; priceVersion?: string | null },
+  input: CreateTaskInput & {
+    parentTaskId?: string;
+    userId?: string | null;
+    priceVersion?: string | null;
+    /** live 任务预留金额（元）；仅登录用户的 live 任务由路由层传入 */
+    reserveCny?: number;
+  },
 ): Task {
   const prompt = input.prompt.trim();
   const mode: ModelMode = input.mode ?? 'demo';
   const userId = input.userId ?? null;
   const priceVersion = mode === 'live' ? (input.priceVersion ?? null) : null;
+  const reserveCny = input.reserveCny;
   const now = new Date().toISOString();
   const id = randomUUID();
+  const modelId = input.modelId ?? DEFAULT_MODEL_ID;
 
-  const event = transaction(db, () => {
+  const event = withTransaction(db, () => {
     db.prepare(
       'INSERT INTO tasks (id, user_id, prompt, status, mode, model_id, price_version, parent_task_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-    ).run(id, userId, prompt, 'queued', mode, input.modelId ?? DEFAULT_MODEL_ID, priceVersion, input.parentTaskId ?? null, now, now);
+    ).run(id, userId, prompt, 'queued', mode, modelId, priceVersion, input.parentTaskId ?? null, now, now);
+    if (reserveCny !== undefined) {
+      if (userId === null || mode !== 'live' || priceVersion === null) {
+        throw new Error('reserveCny 仅可用于登录用户的 live 任务（编程错误）');
+      }
+      // 同事务写预留：余额不足 402 时整个创建回滚
+      reserveForTask(
+        db,
+        { taskId: id, userId, modelId, priceVersion, reservedCny: reserveCny },
+        reserveCny,
+      );
+      db.prepare('UPDATE tasks SET reserved_cny = ? WHERE id = ?').run(reserveCny, id);
+    }
     return insertEvent(db, id, 'task.created', { prompt });
   });
   publishTaskEvent(event);
 
   return getTask(db, id);
-}
-
-/**
- * 补偿删除：仅限仍为 queued 的任务（预留失败等同步补偿路径；无 await 间隔，不存在并发窗口）。
- * 返回是否删除。终态 / 进行中任务一律拒绝删除 —— 历史不可改写。
- */
-export function deleteQueuedTask(db: DatabaseSync, taskId: string): boolean {
-  return transaction(db, () => {
-    const row = queryOne<{ status: TaskStatus }>(
-      db,
-      'SELECT status FROM tasks WHERE id = ?',
-      taskId,
-    );
-    if (!row || row.status !== 'queued') return false;
-    db.prepare('DELETE FROM task_events WHERE task_id = ?').run(taskId);
-    db.prepare('DELETE FROM tasks WHERE id = ?').run(taskId);
-    return true;
-  });
 }
 
 /** 该用户进行中 live 任务的预留合计（元）—— 余额展示用 */

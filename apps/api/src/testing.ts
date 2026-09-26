@@ -29,6 +29,10 @@ export async function makeApp(
     modelApiKey: undefined,
     modelBaseUrl: 'https://api.deepseek.com',
     modelName: 'deepseek-flash',
+    // 支付与安全开关同样固定，不随本地 .env 变化；特殊场景经 options.config 覆盖
+    mockPaymentsEnabled: true,
+    isProduction: false,
+    platformDailyHardLimitCny: 0,
     ...options.config,
   });
   const db = openDatabase(config.databaseUrl);

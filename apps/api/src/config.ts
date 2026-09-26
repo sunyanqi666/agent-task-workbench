@@ -26,6 +26,12 @@ export interface AppConfig {
   maxTaskBudgetCny: number;
   /** 平台当日净流出告警阈值（元）：超过仅告警不阻断；<= 0 关闭 */
   platformDailyBudgetCny: number;
+  /** 平台当日净流出硬上限（元）：含本次预估超限即拒绝创建/重试 live 任务；<= 0 关闭 */
+  platformDailyHardLimitCny: number;
+  /** 模拟支付端点开关：默认关闭（生产安全默认值），本地开发/测试显式开启 */
+  mockPaymentsEnabled: boolean;
+  /** 生产标记：NODE_ENV=production 时启用 Secure Cookie 等加固 */
+  isProduction: boolean;
   /** demo 模型每步之间的固定延迟：让执行过程在 SSE 实时流中可见；0 表示立即执行 */
   demoStepDelayMs: number;
   /** Fastify 日志开关（测试时关闭避免噪音） */
@@ -91,6 +97,9 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     userCreateRatePerMinute: intEnv('USER_CREATE_RATE_PER_MINUTE', 10),
     maxTaskBudgetCny: floatEnv('MAX_TASK_BUDGET_CNY', 10),
     platformDailyBudgetCny: floatEnv('PLATFORM_DAILY_BUDGET_CNY', 50),
+    platformDailyHardLimitCny: floatEnv('PLATFORM_DAILY_HARD_LIMIT_CNY', 200),
+    mockPaymentsEnabled: process.env.ENABLE_MOCK_PAYMENTS === 'true',
+    isProduction: process.env.NODE_ENV === 'production',
     demoStepDelayMs: intEnv('DEMO_STEP_DELAY_MS', 400),
     logger: true,
     ...overrides,

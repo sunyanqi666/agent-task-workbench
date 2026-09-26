@@ -48,9 +48,17 @@ interface PaymentBody {
   amountCny?: unknown;
 }
 
-export function registerPaymentRoutes(app: FastifyInstance, db: DatabaseSync): void {
+export function registerPaymentRoutes(app: FastifyInstance, db: DatabaseSync, enabled: boolean): void {
+  // 生产安全默认值：ENABLE_MOCK_PAYMENTS 未显式开启时端点不可用（403），防止测试入口暴露在生产
+  const guard = (): void => {
+    if (!enabled) {
+      throw new AppError('模拟支付未启用（生产环境应保持关闭，仅本地开发/测试开启）', 403, 'mock_payments_disabled');
+    }
+  };
+
   // 模拟充值回调：等价于第三方支付成功通知。重复 paymentId 幂等（recorded=false，不重复入账）。
   app.post('/api/v1/payments/mock-topup', async (request: FastifyRequest) => {
+    guard();
     const user = getUserFromRequest(db, request);
     if (!user) throw new UnauthorizedError('充值需要登录');
     const body = (request.body ?? {}) as PaymentBody;
@@ -63,6 +71,7 @@ export function registerPaymentRoutes(app: FastifyInstance, db: DatabaseSync): v
   // 退款：必须引用本用户的一笔充值；分笔退款累计不得超过原充值；
   // 同一通知重放（同 paymentId 同金额）幂等跳过（biz_key = refund:{paymentId}:{amount}）。
   app.post('/api/v1/payments/refund', async (request: FastifyRequest) => {
+    guard();
     const user = getUserFromRequest(db, request);
     if (!user) throw new UnauthorizedError('退款需要登录');
     const body = (request.body ?? {}) as PaymentBody;

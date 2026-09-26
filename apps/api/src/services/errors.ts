@@ -39,11 +39,11 @@ export class UnauthorizedError extends AppError {
   }
 }
 
-/** 用户配额超限 → 429（并发 / 频率） */
+/** 配额超限 → 429（用户并发 / 频率 / 平台日预算硬上限） */
 export class QuotaExceededError extends AppError {
   constructor(
     message: string,
-    code: 'user_concurrency_limit' | 'rate_limited',
+    code: 'user_concurrency_limit' | 'rate_limited' | 'platform_daily_budget_exceeded',
   ) {
     super(message, 429, code);
   }

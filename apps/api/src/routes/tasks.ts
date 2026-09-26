@@ -4,18 +4,16 @@ import { AVAILABLE_MODELS, DEFAULT_MODEL_ID, MODEL_PRICE_VERSION, PROMPT_MAX_LEN
 import { AppError, ConflictError, NotFoundError, UnauthorizedError, ValidationError } from '../services/errors';
 import {
   createTask,
-  deleteQueuedTask,
   getEvents,
   getOwnedTask,
   listTasks,
-  setReservedCny,
   taskOwnedBy,
   transitionTask,
 } from '../services/taskService';
 import { assertCanCreateTask } from '../services/quotaService';
 import {
+  assertPlatformDailyBudget,
   getEntriesByTask,
-  reserveForTask,
   warnIfPlatformBudgetExceeded,
 } from '../services/ledgerService';
 import { getUserFromRequest } from '../services/authService';
@@ -104,24 +102,19 @@ export function registerTaskRoutes(app: FastifyInstance, deps: RunnerDeps): void
           },
         })
       : null;
+    // 平台费用硬上限（429）：当日净流出 + 本次预估超限即拒绝，平台级兜底
+    if (estimateCny !== null) {
+      assertPlatformDailyBudget(deps.db, deps.platformDailyHardLimitCny, estimateCny);
+    }
+    // 创建 + 预留同一事务：余额不足 402 时任务不会存在，无需补偿删除
     const task = createTask(deps.db, {
       ...input,
       userId: user?.id ?? null,
-      ...(estimateCny !== null ? { priceVersion: MODEL_PRICE_VERSION } : {}),
+      ...(estimateCny !== null && user
+        ? { priceVersion: MODEL_PRICE_VERSION, reserveCny: estimateCny }
+        : {}),
     });
-    // 预留制（P5 账本）：live 任务创建即扣预估上限，终态结算释放；失败则补偿删除不留悬挂任务
-    if (estimateCny !== null && user) {
-      try {
-        reserveForTask(
-          deps.db,
-          { taskId: task.id, userId: user.id, modelId: task.modelId, priceVersion: task.priceVersion },
-          estimateCny,
-        );
-      } catch (err) {
-        deleteQueuedTask(deps.db, task.id);
-        throw err;
-      }
-      setReservedCny(deps.db, task.id, estimateCny);
+    if (estimateCny !== null) {
       // 运营保护：平台当日净流出告警（仅告警不阻断，阈值 <= 0 关闭）
       warnIfPlatformBudgetExceeded(deps.db, deps.platformDailyBudgetCny);
     }
@@ -298,26 +291,22 @@ export function registerTaskRoutes(app: FastifyInstance, deps: RunnerDeps): void
           },
         })
       : null;
+    // 平台费用硬上限（429）：与创建同口径
+    if (estimateCny !== null) {
+      assertPlatformDailyBudget(deps.db, deps.platformDailyHardLimitCny, estimateCny);
+    }
+    // 重试创建 + 预留同一事务（余额不足 402 时不产生新任务）
     const retry = createTask(deps.db, {
       prompt: task.prompt,
       mode: task.mode,
       modelId: task.modelId, // 重试沿用原任务创建时固化的模型选择
       parentTaskId: task.id,
       userId: task.userId, // 归属随原任务（请求者必为归属者，见上方归属校验）
-      ...(estimateCny !== null ? { priceVersion: MODEL_PRICE_VERSION } : {}),
+      ...(estimateCny !== null && task.userId
+        ? { priceVersion: MODEL_PRICE_VERSION, reserveCny: estimateCny }
+        : {}),
     });
-    if (estimateCny !== null && task.userId) {
-      try {
-        reserveForTask(
-          deps.db,
-          { taskId: retry.id, userId: task.userId, modelId: retry.modelId, priceVersion: retry.priceVersion },
-          estimateCny,
-        );
-      } catch (err) {
-        deleteQueuedTask(deps.db, retry.id);
-        throw err;
-      }
-      setReservedCny(deps.db, retry.id, estimateCny);
+    if (estimateCny !== null) {
       // 运营保护：与创建同口径的当日净流出告警
       warnIfPlatformBudgetExceeded(deps.db, deps.platformDailyBudgetCny);
     }

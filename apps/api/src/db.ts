@@ -31,16 +31,34 @@ function applyMigrations(db: DatabaseSync): void {
     if (Number.isNaN(target) || target <= current) continue;
     const sql = readFileSync(path.join(MIGRATIONS_DIR, file), 'utf8');
     // 迁移语句与 user_version 更新必须同事务：中断后重启动不会重复执行已应用的迁移
-    db.exec('BEGIN');
-    try {
+    withTransaction(db, () => {
       db.exec(sql);
       db.exec(`PRAGMA user_version = ${target}`);
-      db.exec('COMMIT');
-    } catch (err) {
-      db.exec('ROLLBACK');
-      throw err;
-    }
+    });
     current = target;
+  }
+}
+
+/**
+ * 可重入事务：已在事务中时直接参与外层事务（内层异常向上传播，由最外层统一回滚），
+ * 否则开启新事务（异常时回滚并原样抛出）。
+ * SQLite 无嵌套事务，服务层（任务 + 账本）组合操作时内层必须复用外层事务而非再次 BEGIN。
+ */
+const inTransaction = new WeakSet<DatabaseSync>();
+
+export function withTransaction<T>(db: DatabaseSync, fn: () => T): T {
+  if (inTransaction.has(db)) return fn();
+  db.exec('BEGIN');
+  inTransaction.add(db);
+  try {
+    const result = fn();
+    db.exec('COMMIT');
+    return result;
+  } catch (err) {
+    db.exec('ROLLBACK');
+    throw err;
+  } finally {
+    inTransaction.delete(db);
   }
 }
 

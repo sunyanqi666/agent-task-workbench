@@ -29,7 +29,7 @@
 | POST | `/api/v1/auth/logout` | 登出（204） | P5 ✅ |
 | GET | `/api/v1/auth/me` | 当前登录用户；未登录返回 `{ user: null }` | P5 ✅ |
 | GET | `/api/v1/me/balance` | 余额与进行中任务预留合计；未登录 401 | P5 ✅ |
-| POST | `/api/v1/payments/mock-topup` | 模拟充值回调（登录后）；按 `paymentId` 幂等 | P5 ✅ |
+| POST | `/api/v1/payments/mock-topup` | 模拟充值回调（登录后）；按 `paymentId` 幂等；默认关闭（`ENABLE_MOCK_PAYMENTS` 开启），关闭时 403 | P5 ✅ |
 | POST | `/api/v1/payments/refund` | 退款（登录后）；累计不超原充值，重放幂等 | P5 ✅ |
 
 ### 示例（P1/P2 已实现端点）
@@ -135,6 +135,7 @@ curl -b jar.txt -X POST http://localhost:3000/api/v1/payments/refund \
 - 余额校验：live 预估费用上限超过当前余额 → 402 `insufficient_balance`；
 - 单任务预算：预估上限超过 `MAX_TASK_BUDGET_CNY`（默认 10 元）→ 400；
 - 并发与频控：进行中任务数超 `MAX_USER_CONCURRENT_TASKS`、创建频率超 `USER_CREATE_RATE_PER_MINUTE` → 429；
+- 平台硬上限：当日净流出（reserve+actual）+ 本次预估超过 `PLATFORM_DAILY_HARD_LIMIT_CNY`（默认 200 元；≤0 关闭）→ 429 `platform_daily_budget_exceeded`，平台级兜底，优先级高于用户限额；
 - 限额对 demo 模式不生效（不计费）。
 
 **用量账本（`ledger_entries`，唯一读写入口 `ledgerService`）**：
@@ -149,15 +150,17 @@ curl -b jar.txt -X POST http://localhost:3000/api/v1/payments/refund \
 
 - 净扣恒等于 Σactual（预留只是占用，结算原路释放），不存在重复扣费路径；每条记录固化 `price_version`（如 `2026-09-26.1`）与 `balance_after` 余额快照，目录调价时递增 `MODEL_PRICE_VERSION`。
 - 余额口径：`topup + refund + settle + actual` 的累计和（`GET /api/v1/me/balance`），进行中任务的预留单独返回 `reservedCny`。
+- 事务语义（账本可靠性）：**创建/重试任务 + 扣预留**、**任务落终态 + 释放预留**各自在同一个 SQLite 事务中完成（服务层经可重入 `withTransaction` 组合，余额不足 402 时整个创建回滚、任务行不存在）——任何时刻崩溃都不会留下「有任务无预留」或「已终态未释放」的中间态；`biz_key` 唯一约束另保证重放幂等。
 - 任务详情页展示扣费明细（`GET /api/v1/tasks/:id/ledger`）；价格版本随任务快照返回（`priceVersion`）。
 
 **支付测试环境（mock）**：
 
+- 默认关闭（防误用）：仅 `ENABLE_MOCK_PAYMENTS=true` 时开放，否则 403 `mock_payments_disabled`；生产环境严禁开启。
 - `POST /api/v1/payments/mock-topup`：模拟「服务端验证后的支付成功回调」，`paymentId` 幂等——重复回调返回 `{ recorded: false }` 不重复入账；金额必须为正数（分精度，四舍五入到分）、单笔 ≤ 10000 元，非法金额 400 不入账（失败路径演练）。
 - `POST /api/v1/payments/refund`：必须引用本用户的一笔充值（否则 404）；分笔退款累计不得超过原充值（400 `refund_exceeds_topup`）；同一通知重放（同 `paymentId` 同金额）幂等跳过。
 - 真实支付接入时，把 mock 回调替换为带签名验证的服务端对服务端回调即可，入账语义（biz_key 幂等）不变。
 
-**运营保护**：工具白名单与 `MAX_STEPS` / `MAX_TOOL_CALLS_PER_TURN` / `STEP_TIMEOUT_MS`（P1-P3）+ 单任务预算与用户限额（P5）+ 平台日预算告警 `PLATFORM_DAILY_BUDGET_CNY`（默认 50 元；当日 reserve+actual 净流出超阈值仅告警不阻断）+ 对账测试（预留/扣费/释放/充值/退款在测试中逐笔核对）。前端创建 live 任务时展示预估费用上限、当前余额与「模型供应商将处理任务内容」提示。
+**运营保护**：工具白名单与 `MAX_STEPS` / `MAX_TOOL_CALLS_PER_TURN` / `STEP_TIMEOUT_MS`（P1-P3）+ 单任务预算与用户限额（P5）+ 平台日预算告警 `PLATFORM_DAILY_BUDGET_CNY`（默认 50 元；当日 reserve+actual 净流出超阈值仅告警不阻断）+ 平台费用硬上限 `PLATFORM_DAILY_HARD_LIMIT_CNY`（默认 200 元；超限拒绝创建/重试 live 任务 429）+ 会话安全（`NODE_ENV=production` 时 Cookie 追加 Secure）+ 对账测试（预留/扣费/释放/充值/退款在测试中逐笔核对，中断/重试/重复回调后余额与账本恒等）。前端创建 live 任务时展示预估费用上限、当前余额与「模型供应商将处理任务内容」提示。
 
 ### 启动恢复（P4）
 

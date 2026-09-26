@@ -31,6 +31,8 @@ export interface RunnerDeps {
   maxTaskBudgetCny: number;
   /** 平台当日净流出告警阈值（元），创建 / 重试预留后检查；<= 0 关闭 */
   platformDailyBudgetCny: number;
+  /** 平台当日净流出硬上限（元），创建 / 重试前检查；<= 0 关闭 */
+  platformDailyHardLimitCny: number;
 }
 
 /** 协作式取消的内部信号：工具执行中途被取消时跳过事件写入，由运行器统一转终态 */

@@ -35,6 +35,7 @@ function makeDeps(overrides: Partial<RunnerDeps> = {}): {
     userCreateRatePerMinute: 10,
     maxTaskBudgetCny: 10,
     platformDailyBudgetCny: 0, // 测试默认关闭平台预算告警
+    platformDailyHardLimitCny: 0, // 测试默认关闭硬上限
     ...overrides,
   };
   return { deps, db, cleanup: () => { db.close(); rmSync(dir, { recursive: true, force: true }); } };

@@ -193,14 +193,14 @@ export function getSessionTokenFromRequest(request: FastifyRequest): string | un
   return parseCookies(request.headers.cookie)[SESSION_COOKIE_NAME];
 }
 
-/** 构造 Set-Cookie 值：HttpOnly + SameSite=Lax；生产经反向代理提供 HTTPS 后可追加 Secure */
-export function sessionCookieHeader(token: string, maxAgeSeconds: number): string {
-  return `${SESSION_COOKIE_NAME}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSeconds}`;
+/** 构造 Set-Cookie 值：HttpOnly + SameSite=Lax + Max-Age；生产（HTTPS）追加 Secure */
+export function sessionCookieHeader(token: string, maxAgeSeconds: number, secure = false): string {
+  return `${SESSION_COOKIE_NAME}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSeconds}${secure ? '; Secure' : ''}`;
 }
 
-/** 登出时的清除 Cookie 值 */
-export function clearSessionCookieHeader(): string {
-  return `${SESSION_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`;
+/** 登出时的清除 Cookie 值（与下发时属性保持一致） */
+export function clearSessionCookieHeader(secure = false): string {
+  return `${SESSION_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secure ? '; Secure' : ''}`;
 }
 
 /** 供归属校验等场景按 id 反查用户（不存在返回 null） */

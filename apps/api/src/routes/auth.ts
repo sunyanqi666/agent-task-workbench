@@ -33,17 +33,22 @@ function parseAuthBody(body: unknown): { username: string; password: string } {
   return { username, password };
 }
 
-function setSessionCookie(reply: FastifyReply, db: DatabaseSync, userId: string): void {
+function setSessionCookie(
+  reply: FastifyReply,
+  db: DatabaseSync,
+  userId: string,
+  secure: boolean,
+): void {
   pruneExpiredSessions(db); // 低频路径顺手清理过期会话
   const { token, maxAgeSeconds } = createSession(db, userId);
-  reply.header('set-cookie', sessionCookieHeader(token, maxAgeSeconds));
+  reply.header('set-cookie', sessionCookieHeader(token, maxAgeSeconds, secure));
 }
 
-export function registerAuthRoutes(app: FastifyInstance, db: DatabaseSync): void {
+export function registerAuthRoutes(app: FastifyInstance, db: DatabaseSync, secureCookies: boolean): void {
   // 注册：成功即建立会话（201 + Set-Cookie）
   app.post('/api/v1/auth/register', async (request: FastifyRequest, reply: FastifyReply) => {
     const user = registerUser(db, parseAuthBody(request.body));
-    setSessionCookie(reply, db, user.id);
+    setSessionCookie(reply, db, user.id, secureCookies);
     reply.code(201);
     return { user } satisfies AuthResponse;
   });
@@ -51,7 +56,7 @@ export function registerAuthRoutes(app: FastifyInstance, db: DatabaseSync): void
   // 登录：校验凭证并建立会话（200 + Set-Cookie）；凭证错误 401
   app.post('/api/v1/auth/login', async (request: FastifyRequest, reply: FastifyReply) => {
     const user = verifyLogin(db, parseAuthBody(request.body));
-    setSessionCookie(reply, db, user.id);
+    setSessionCookie(reply, db, user.id, secureCookies);
     return { user } satisfies AuthResponse;
   });
 
@@ -59,7 +64,7 @@ export function registerAuthRoutes(app: FastifyInstance, db: DatabaseSync): void
   app.post('/api/v1/auth/logout', async (request: FastifyRequest, reply: FastifyReply) => {
     const token = getSessionTokenFromRequest(request);
     if (token) deleteSession(db, token);
-    reply.header('set-cookie', clearSessionCookieHeader());
+    reply.header('set-cookie', clearSessionCookieHeader(secureCookies));
     reply.code(204);
     return null;
   });

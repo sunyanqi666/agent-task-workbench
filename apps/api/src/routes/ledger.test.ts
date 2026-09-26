@@ -1,8 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { FastifyInstance } from 'fastify';
+import type { DatabaseSync } from 'node:sqlite';
 import type { BalanceResponse, Task, TaskLedgerResponse } from 'contracts';
 import { MODEL_PRICE_VERSION, estimateTaskBudgetCny } from 'contracts';
+import { queryAll, queryOne } from '../db';
 import {
   getBalanceCny,
   getEntriesByTask,
@@ -40,6 +42,44 @@ async function register(app: FastifyInstance, username: string): Promise<{ cooki
 
 function sumEntries(entries: LedgerEntry[]): number {
   return Math.round(entries.reduce((acc, e) => acc + e.amountCny, 0) * 1e6) / 1e6;
+}
+
+/**
+ * 账本一致性不变量（可靠性加固的验收口径）：
+ * 1. 余额 == 全部条目代数和（不是独立存储，防口径漂移）；
+ * 2. 终态 live 任务：必有 settle 条目，reserve 与 settle 全额抵消（净额 == -Σactual，即真实消耗）；
+ * 3. 进行中 live 任务：不得有 settle 条目，行上 reserved_cny == -Σreserve（预留与账本互相印证）。
+ */
+function expectLedgerConsistent(db: DatabaseSync, userId: string): void {
+  const { balance } = queryOne<{ balance: number }>(
+    db,
+    'SELECT COALESCE(SUM(amount_cny), 0) AS balance FROM ledger_entries WHERE user_id = ?',
+    userId,
+  )!;
+  assert.equal(getBalanceCny(db, userId), balance, '余额 == 账本代数和');
+
+  const tasks = queryAll<{ id: string; status: string; reserved_cny: number }>(
+    db,
+    "SELECT id, status, reserved_cny FROM tasks WHERE user_id = ? AND mode = 'live'",
+    userId,
+  );
+  for (const task of tasks) {
+    const taskEntries = getEntriesByTask(db, task.id);
+    const hasSettle = taskEntries.some((e) => e.kind === 'settle');
+    const hasReserve = taskEntries.some((e) => e.kind === 'reserve');
+    if (['completed', 'failed', 'canceled'].includes(task.status)) {
+      assert.equal(hasSettle, hasReserve, `终态任务 ${task.id} 的预留必须已释放`);
+      // 预留 + 释放 == 0：悬挂的 reserve/settle 都算违例；actual 是真实消耗，保留
+      const reserveAndSettle = sumEntries(taskEntries.filter((e) => e.kind !== 'actual'));
+      assert.equal(reserveAndSettle, 0, `终态任务 ${task.id} 预留必须全额释放`);
+    } else {
+      assert.equal(hasSettle, false, `进行中任务 ${task.id} 不得提前释放预留`);
+      if (hasReserve) {
+        const reserved = -sumEntries(taskEntries.filter((e) => e.kind === 'reserve'));
+        assert.equal(task.reserved_cny, reserved, `进行中任务 ${task.id} 行上预留与账本一致`);
+      }
+    }
+  }
 }
 
 test('demo 任务不产生账本记录', async (t) => {
@@ -330,4 +370,196 @@ test('对账：每用户余额 = 账本代数和；每个终态 live 任务恰�
       `实际成本 ${actualTotal} 不应超过预留 ${estimate}`,
     );
   }
+});
+
+// ===== 账本可靠性加固：中断 / 重试 / 重复回调 / 事务原子性 / 硬上限 / mock 开关 =====
+
+test('中断恢复：运行中崩溃 → 恢复落终态与释放预留同事务，余额与账本对上', async (t) => {
+  const { app, db, cleanup } = await makeApp();
+  t.after(cleanup);
+  const { userId } = await register(app, 'ledger_interrupt');
+  recordTopup(db, userId, 5, 'pay_interrupt');
+  expectLedgerConsistent(db, userId);
+
+  // 模拟崩溃遗留：任务已创建并预留（同事务），执行中进程崩溃（recovery 的 running → failed 路径）
+  const task = createTask(db, {
+    prompt: '中断恢复',
+    mode: 'live',
+    modelId: 'deepseek-flash',
+    userId,
+    priceVersion: MODEL_PRICE_VERSION,
+    reserveCny: estimateTaskBudgetCny('deepseek-flash', 20)!,
+  });
+  assert.equal(getBalanceCny(db, userId), 5 - 0.48, '创建+预留同事务扣减');
+  expectLedgerConsistent(db, userId);
+
+  // 恢复落终态（与 recovery.markInterrupted 一致）：状态更新与释放预留在同一事务
+  transitionTask(db, task.id, { to: 'running' });
+  transitionTask(db, task.id, { to: 'failed', errorCode: 'interrupted', message: '进程中断恢复' });
+  const entries = getEntriesByTask(db, task.id).map((e) => e.kind);
+  assert.deepEqual(entries, ['reserve', 'settle'], '同事务完成终态迁移与释放');
+  assert.equal(getBalanceCny(db, userId), 5, '无实际消耗时预留全额释放');
+  expectLedgerConsistent(db, userId);
+});
+
+test('事务原子性：余额不足 402 时不产生任务行（创建+预留回滚）', async (t) => {
+  const { app, db, cleanup } = await makeApp({
+    config: {
+      modelProvider: 'deepseek',
+      modelApiKey: 'test-key-not-used',
+      modelBaseUrl: 'http://127.0.0.1:1',
+      modelName: 'deepseek-flash',
+    },
+  });
+  t.after(cleanup);
+  const { cookie, userId } = await register(app, 'ledger_rollback');
+
+  // 余额 0，live 创建应 402 且不留任何任务行
+  const res = await app.inject({
+    method: 'POST',
+    url: '/api/v1/tasks',
+    payload: { prompt: '余额不足', mode: 'live' },
+    headers: { cookie },
+  });
+  assert.equal(res.statusCode, 402);
+  assert.equal(res.json().error.code, 'insufficient_balance');
+  const list = await app.inject({ method: 'GET', url: '/api/v1/tasks', headers: { cookie } });
+  assert.equal(list.json().total, 0, '任务行随事务回滚，不存在悬挂任务');
+  assert.equal(getEntriesByUser(db, userId).length, 0, '账本无任何条目');
+  expectLedgerConsistent(db, userId);
+});
+
+test('重试链路：失败 → 重试再预留 → 再终态，全程余额与账本对上', async (t) => {
+  const { app, db, cleanup } = await makeApp({
+    config: {
+      modelProvider: 'deepseek',
+      modelApiKey: 'test-key-not-used',
+      modelBaseUrl: 'http://127.0.0.1:1',
+      modelName: 'deepseek-flash',
+    },
+  });
+  t.after(cleanup);
+  const { cookie, userId } = await register(app, 'ledger_retry');
+  recordTopup(db, userId, 2, 'pay_retry');
+
+  const created = await app.inject({
+    method: 'POST',
+    url: '/api/v1/tasks',
+    payload: { prompt: '重试链路', mode: 'live' },
+    headers: { cookie },
+  });
+  const first = created.json() as Task;
+  await waitForTerminal(app, first.id, 200, { headers: { cookie } });
+  expectLedgerConsistent(db, userId);
+  const afterFirst = getBalanceCny(db, userId);
+  assert.ok(afterFirst < 2 && afterFirst > 1, '预留释放后仅扣实际成本');
+
+  const retried = await app.inject({
+    method: 'POST',
+    url: `/api/v1/tasks/${first.id}/retry`,
+    headers: { cookie },
+  });
+  assert.equal(retried.statusCode, 201);
+  const second = retried.json() as Task;
+  assert.equal(second.parentTaskId, first.id);
+  await waitForTerminal(app, second.id, 200, { headers: { cookie } });
+
+  // 两个任务各自净额为 0，余额 = 充值 - 两次实际成本
+  expectLedgerConsistent(db, userId);
+  const actualSum = -getEntriesByUser(db, userId)
+    .filter((e) => e.kind === 'actual')
+    .reduce((s, e) => s + e.amountCny, 0);
+  assert.equal(getBalanceCny(db, userId), 2 - actualSum);
+});
+
+test('重复回调：充值/退款重放后余额与账本保持不变', async (t) => {
+  const { app, db, cleanup } = await makeApp();
+  t.after(cleanup);
+  const { userId } = await register(app, 'ledger_dup');
+  assert.equal(recordTopup(db, userId, 10, 'pay_dup2'), true);
+  expectLedgerConsistent(db, userId);
+  const afterTopup = getBalanceCny(db, userId);
+
+  assert.equal(recordTopup(db, userId, 10, 'pay_dup2'), false, '重复充值回调不入账');
+  assert.equal(getBalanceCny(db, userId), afterTopup, '余额不变');
+  expectLedgerConsistent(db, userId);
+
+  // 预留 + 结算后再重放退款：余额只受首笔影响
+  const task = createTask(db, {
+    prompt: '重放场景',
+    mode: 'live',
+    modelId: 'deepseek-flash',
+    userId,
+    priceVersion: MODEL_PRICE_VERSION,
+    reserveCny: 0.48,
+  });
+  transitionTask(db, task.id, { to: 'canceled' });
+  expectLedgerConsistent(db, userId);
+});
+
+test('平台费用硬上限：当日净流出 + 本次预估超限拒绝创建（429）', async (t) => {
+  const { app, db, cleanup } = await makeApp({
+    config: {
+      modelProvider: 'deepseek',
+      modelApiKey: 'test-key-not-used',
+      modelBaseUrl: 'http://127.0.0.1:1',
+      modelName: 'deepseek-flash',
+      platformDailyHardLimitCny: 0.5,
+    },
+  });
+  t.after(cleanup);
+  const { cookie, userId } = await register(app, 'ledger_hardcap');
+  recordTopup(db, userId, 10, 'pay_hardcap');
+
+  // 第一单：0 + 0.48 ≤ 0.5 放行
+  const first = await app.inject({
+    method: 'POST',
+    url: '/api/v1/tasks',
+    payload: { prompt: '硬上限内', mode: 'live' },
+    headers: { cookie },
+  });
+  assert.equal(first.statusCode, 201);
+  expectLedgerConsistent(db, userId);
+
+  // 第二单：0.48（预留）+ 0.48 > 0.5 → 429
+  const second = await app.inject({
+    method: 'POST',
+    url: '/api/v1/tasks',
+    payload: { prompt: '硬上限外', mode: 'live' },
+    headers: { cookie },
+  });
+  assert.equal(second.statusCode, 429);
+  assert.equal(second.json().error.code, 'platform_daily_budget_exceeded');
+
+  // demo 不受硬上限约束
+  const demo = await app.inject({
+    method: 'POST',
+    url: '/api/v1/tasks',
+    payload: { prompt: 'demo 不受限' },
+  });
+  assert.equal(demo.statusCode, 201);
+});
+
+test('生产安全：ENABLE_MOCK_PAYMENTS 关闭时模拟支付端点 403', async (t) => {
+  const { app, db, cleanup } = await makeApp({ config: { mockPaymentsEnabled: false } });
+  t.after(cleanup);
+  const { cookie, userId } = await register(app, 'ledger_mockoff');
+
+  const topup = await app.inject({
+    method: 'POST',
+    url: '/api/v1/payments/mock-topup',
+    payload: { paymentId: 'ch_off', amountCny: 10 },
+    headers: { cookie },
+  });
+  assert.equal(topup.statusCode, 403);
+  assert.equal(topup.json().error.code, 'mock_payments_disabled');
+
+  const refund = await app.inject({
+    method: 'POST',
+    url: '/api/v1/payments/refund',
+    payload: { paymentId: 'ch_off', amountCny: 1 },
+    headers: { cookie },
+  });
+  assert.equal(refund.statusCode, 403);
+  assert.equal(getEntriesByUser(db, userId).length, 0, '关闭状态下无任何入账');
 });
