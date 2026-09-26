@@ -187,6 +187,40 @@ test('LiveModel：reasoning_content 解析进动作，并在后续请求中随 a
   assert.equal(assistant?.reasoning_content, '先算 1+2，再基于结果给出结论。');
 });
 
+test('LiveModel：响应缺失 reasoning_content 时回传空字符串兜底（DeepSeek 思考模式缺失 400，空串可接受）', async () => {
+  const { impl, calls } = scriptedFetch([
+    {
+      body: {
+        choices: [
+          {
+            message: {
+              content: null,
+              // 偶发缺失：无 reasoning_content 字段
+              tool_calls: [{ function: { name: 'calculate', arguments: '{"expression":"1+2"}' } }],
+            },
+          },
+        ],
+      },
+    },
+    { body: { choices: [{ message: { content: '完成：结果是 3' } }] } },
+  ]);
+  const model = makeModel(impl);
+
+  const toolAction = await model.nextStep('计算 1+2', []);
+  assert.equal(toolAction.kind, 'tool_call');
+  assert.equal(toolAction.kind === 'tool_call' ? toolAction.reasoning : undefined, undefined);
+
+  const history: StepRecord[] = [{ action: toolAction, toolResults: [{ ok: true, data: 3 }] }];
+  await model.nextStep('计算 1+2', history);
+  const messages = calls[1]!.body.messages as Array<{
+    role: string;
+    reasoning_content?: string;
+    tool_calls?: { id: string }[];
+  }>;
+  const assistant = messages.find((m) => m.role === 'assistant' && m.tool_calls);
+  assert.equal(assistant?.reasoning_content, '', '缺失时必须以空字符串回传，否则 DeepSeek 思考模式 400');
+});
+
 test('LiveModel：modelId 优先于全局 modelName；响应 usage 解析进动作', async () => {
   const { impl, calls } = scriptedFetch([
     {

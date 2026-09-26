@@ -150,7 +150,9 @@ export class LiveModel implements ModelAdapter {
       messages.push({
         role: 'assistant',
         content: null,
-        ...(action.reasoning ? { reasoning_content: action.reasoning } : {}),
+        // 思考模式要求 tool_call 轮次的 reasoning_content 必须回传（缺失 400）；
+        // 响应偶发缺失该字段时传空字符串兜底（实测 DeepSeek 接受空串）
+        reasoning_content: action.reasoning ?? '',
         tool_calls: action.calls.map((call, callIndex) => ({
           id: `call_${index}_${callIndex}`,
           type: 'function' as const,
