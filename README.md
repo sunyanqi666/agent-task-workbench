@@ -9,6 +9,7 @@
 - **P2 实时界面（已完成）**：SSE 实时事件流（回放 + 续接）、创建 / 列表 / 详情 / 时间线，刷新后数据一致
 - **P3 真实模型与控制（已完成）**：DeepSeek（OpenAI 兼容）live 模式、协作式取消、失败重试（parentTaskId 关联）
 - **P4 工程化（进行中）**：CI（GitHub Actions：typecheck / lint / test）✅、生产构建从零启动验收 ✅、模型选择与用量记录（受控模型目录 `GET /api/v1/models`、逐任务 `modelId`、供应商 token 用量累计）✅；容器化 / 演示素材待补
+- **P5 用户选模型与平台内付费（已完成）**：注册登录与任务归属（HttpOnly Cookie 会话）、预留制用量账本（reserve → 逐步 actual → 终态 settle，`biz_key` 幂等防重复扣费）、余额不足 402 / 并发频率限额 429 / 平台费用硬上限、模拟支付测试环境（默认关闭）、创建+预留与终态+释放同一事务的账本可靠性加固；DeepSeek 思考模式多轮工具调用兼容（`reasoning_content` 回传与缺失兜底）
 
 ## 快速开始
 
