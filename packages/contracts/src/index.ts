@@ -10,26 +10,65 @@ export const APP_VERSION = '0.1.0';
 /** demo：确定性模拟事件，不读取密钥；live：真实模型服务（P3 接入） */
 export type ModelMode = 'demo' | 'live';
 
-// ===== 模型目录（P4：逐任务选模型的第一片） =====
+// ===== 模型目录（P4：逐任务选模型的第一片；P5 增加定价） =====
+/** 模型定价：每百万 token 价格（人民币元）；平台受控，用户不接触供应商计价 */
+export interface ModelPricing {
+  promptCnyPerMillion: number;
+  completionCnyPerMillion: number;
+}
+
 export interface ModelInfo {
   /** 模型 id：创建任务时提交的受控标识（如 deepseek-flash） */
   id: string;
   /** 展示名：前端直接渲染 */
   label: string;
+  /** 平台定价：用于预估费用上限展示与单任务预算预留 */
+  pricing: ModelPricing;
 }
 
 /**
  * 服务端受控模型目录：前端只能提交目录中的 id，由 GET /api/v1/models 下发。
  * 当前为同一供应商（DeepSeek）的两个模型；多供应商适配在 P5 扩展。
  * 注意：旧名 deepseek-chat / deepseek-reasoner 已于 2026-07-24 被供应商停用，不得回退。
+ * 定价为平台售价（元 / 百万 token），预估与结算以记账时的价格版本为准。
  */
 export const AVAILABLE_MODELS: readonly ModelInfo[] = [
-  { id: 'deepseek-flash', label: 'DeepSeek Flash（通用 · 快）' },
-  { id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro（旗舰 · 强推理）' },
+  {
+    id: 'deepseek-flash',
+    label: 'DeepSeek Flash（通用 · 快）',
+    pricing: { promptCnyPerMillion: 2, completionCnyPerMillion: 8 },
+  },
+  {
+    id: 'deepseek-v4-pro',
+    label: 'DeepSeek V4 Pro（旗舰 · 强推理）',
+    pricing: { promptCnyPerMillion: 20, completionCnyPerMillion: 80 },
+  },
 ];
 
 /** 未指定 modelId 时的缺省模型 */
 export const DEFAULT_MODEL_ID: string = AVAILABLE_MODELS[0]!.id;
+
+// ===== 单任务预算估算（P5 额度与限额） =====
+/** 每步 token 估算上限：输入含历史重建与工具结果，输出为模型响应上界 */
+export const ESTIMATED_INPUT_TOKENS_PER_STEP = 4000;
+export const ESTIMATED_OUTPUT_TOKENS_PER_STEP = 2000;
+
+/**
+ * 单任务预估费用上限（元）= maxSteps ×（每步输入估算 × 输入单价 + 每步输出估算 × 输出单价）。
+ * 这是预留/提示用的上限而非实际扣费；最终以供应商用量按记账时价格结算。
+ * modelId 不在目录中返回 null（调用方应先做白名单校验）。
+ */
+export function estimateTaskBudgetCny(modelId: string, maxSteps: number): number | null {
+  const model = AVAILABLE_MODELS.find((m) => m.id === modelId);
+  if (!model) return null;
+  const { promptCnyPerMillion, completionCnyPerMillion } = model.pricing;
+  return (
+    (maxSteps *
+      (ESTIMATED_INPUT_TOKENS_PER_STEP * promptCnyPerMillion +
+        ESTIMATED_OUTPUT_TOKENS_PER_STEP * completionCnyPerMillion)) /
+    1_000_000
+  );
+}
 
 // ===== 任务状态机 =====
 // queued -> running -> completed | failed

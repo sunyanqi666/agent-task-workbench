@@ -13,8 +13,16 @@ test('模型目录：GET /api/v1/models 返回受控列表（两个 DeepSeek 模
   assert.equal(res.statusCode, 200);
   const { models } = res.json() as ModelListResponse;
   assert.deepEqual(models, [
-    { id: 'deepseek-flash', label: 'DeepSeek Flash（通用 · 快）' },
-    { id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro（旗舰 · 强推理）' },
+    {
+      id: 'deepseek-flash',
+      label: 'DeepSeek Flash（通用 · 快）',
+      pricing: { promptCnyPerMillion: 2, completionCnyPerMillion: 8 },
+    },
+    {
+      id: 'deepseek-v4-pro',
+      label: 'DeepSeek V4 Pro（旗舰 · 强推理）',
+      pricing: { promptCnyPerMillion: 20, completionCnyPerMillion: 80 },
+    },
   ]);
   assert.deepEqual(models, AVAILABLE_MODELS);
 });

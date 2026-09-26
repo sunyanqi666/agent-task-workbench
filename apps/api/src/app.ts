@@ -60,6 +60,9 @@ export async function buildServer(
     maxSteps: config.maxSteps,
     maxToolCallsPerTurn: config.maxToolCallsPerTurn,
     stepTimeoutMs: config.stepTimeoutMs,
+    maxUserConcurrentTasks: config.maxUserConcurrentTasks,
+    userCreateRatePerMinute: config.userCreateRatePerMinute,
+    maxTaskBudgetCny: config.maxTaskBudgetCny,
   };
 
   // 启动恢复：处理上次进程中断遗留的 queued / running 任务，保证不永久停留进行中状态

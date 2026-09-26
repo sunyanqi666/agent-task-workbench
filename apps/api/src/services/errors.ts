@@ -38,3 +38,13 @@ export class UnauthorizedError extends AppError {
     super(message, 401, 'unauthorized');
   }
 }
+
+/** 用户配额超限 → 429（并发 / 频率） */
+export class QuotaExceededError extends AppError {
+  constructor(
+    message: string,
+    code: 'user_concurrency_limit' | 'rate_limited',
+  ) {
+    super(message, 429, code);
+  }
+}

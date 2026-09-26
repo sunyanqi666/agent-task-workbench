@@ -17,6 +17,13 @@ export interface AppConfig {
   /** 单轮模型响应允许执行的工具调用数量上限（maxSteps 只计模型轮次；超限调用记为失败结果回传） */
   maxToolCallsPerTurn: number;
   stepTimeoutMs: number;
+  // ===== P5 额度与限额（仅约束登录用户；匿名仅可 demo，live 已被 401 拦截） =====
+  /** 每用户并发任务上限（queued + running 计数） */
+  maxUserConcurrentTasks: number;
+  /** 每用户每分钟创建任务数上限（滚动 60s 窗口，DB 计数） */
+  userCreateRatePerMinute: number;
+  /** 单任务预估费用上限（元）：预估超过该值的 live 任务拒绝创建 */
+  maxTaskBudgetCny: number;
   /** demo 模型每步之间的固定延迟：让执行过程在 SSE 实时流中可见；0 表示立即执行 */
   demoStepDelayMs: number;
   /** Fastify 日志开关（测试时关闭避免噪音） */
@@ -50,6 +57,12 @@ function intEnv(key: string, fallback: number): number {
   return Number(process.env[key] ?? fallback) || fallback;
 }
 
+/** 读取浮点环境变量；非法值或负数回退默认值 */
+function floatEnv(key: string, fallback: number): number {
+  const value = Number(process.env[key]);
+  return Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
 /** 读取字符串环境变量；空白视为未设置，回退默认值 */
 function stringEnv(key: string, fallback: string): string {
   const value = process.env[key]?.trim();
@@ -72,6 +85,9 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     maxSteps: intEnv('MAX_STEPS', 20),
     maxToolCallsPerTurn: intEnv('MAX_TOOL_CALLS_PER_TURN', 10),
     stepTimeoutMs: intEnv('STEP_TIMEOUT_MS', 60_000),
+    maxUserConcurrentTasks: intEnv('MAX_USER_CONCURRENT_TASKS', 5),
+    userCreateRatePerMinute: intEnv('USER_CREATE_RATE_PER_MINUTE', 10),
+    maxTaskBudgetCny: floatEnv('MAX_TASK_BUDGET_CNY', 10),
     demoStepDelayMs: intEnv('DEMO_STEP_DELAY_MS', 400),
     logger: true,
     ...overrides,

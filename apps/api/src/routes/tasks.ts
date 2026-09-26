@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { CreateTaskInput, TaskEvent, TaskEventType } from 'contracts';
-import { AVAILABLE_MODELS, PROMPT_MAX_LENGTH } from 'contracts';
+import { AVAILABLE_MODELS, DEFAULT_MODEL_ID, PROMPT_MAX_LENGTH } from 'contracts';
 import { AppError, ConflictError, NotFoundError, UnauthorizedError, ValidationError } from '../services/errors';
 import {
   createTask,
@@ -10,6 +10,7 @@ import {
   taskOwnedBy,
   transitionTask,
 } from '../services/taskService';
+import { assertCanCreateTask } from '../services/quotaService';
 import { getUserFromRequest } from '../services/authService';
 import { subscribeTaskEvents } from '../services/eventBus';
 import { getCancelController } from '../runner/cancelRegistry';
@@ -82,6 +83,19 @@ export function registerTaskRoutes(app: FastifyInstance, deps: RunnerDeps): void
         503,
         'live_model_not_configured',
       );
+    }
+    // P5 额度与限额：并发 / 频率 / 单任务预算（仅登录用户；估算与预留见 quotaService）
+    if (user) {
+      assertCanCreateTask(deps.db, user.id, {
+        mode: input.mode ?? 'demo',
+        modelId: input.modelId ?? DEFAULT_MODEL_ID,
+        maxSteps: deps.maxSteps,
+        limits: {
+          maxConcurrent: deps.maxUserConcurrentTasks,
+          ratePerMinute: deps.userCreateRatePerMinute,
+          maxTaskBudgetCny: deps.maxTaskBudgetCny,
+        },
+      });
     }
     const task = createTask(deps.db, { ...input, userId: user?.id ?? null });
     void runTask(deps, task.id); // 异步执行，不阻塞 201 响应
@@ -235,6 +249,19 @@ export function registerTaskRoutes(app: FastifyInstance, deps: RunnerDeps): void
     }
     if (task.mode === 'live' && !deps.liveModel) {
       throw new AppError('真实模型未配置，无法重试 live 任务', 503, 'live_model_not_configured');
+    }
+    // 重试同样受额度与限额约束（重试产生新任务，与创建同口径）
+    if (task.userId) {
+      assertCanCreateTask(deps.db, task.userId, {
+        mode: task.mode,
+        modelId: task.modelId,
+        maxSteps: deps.maxSteps,
+        limits: {
+          maxConcurrent: deps.maxUserConcurrentTasks,
+          ratePerMinute: deps.userCreateRatePerMinute,
+          maxTaskBudgetCny: deps.maxTaskBudgetCny,
+        },
+      });
     }
 
     const retry = createTask(deps.db, {

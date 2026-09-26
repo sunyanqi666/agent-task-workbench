@@ -31,6 +31,9 @@ function makeDeps(overrides: Partial<RunnerDeps> = {}): {
     maxSteps: 5,
     maxToolCallsPerTurn: 10,
     stepTimeoutMs: 1000,
+    maxUserConcurrentTasks: 5,
+    userCreateRatePerMinute: 10,
+    maxTaskBudgetCny: 10,
     ...overrides,
   };
   return { deps, db, cleanup: () => { db.close(); rmSync(dir, { recursive: true, force: true }); } };

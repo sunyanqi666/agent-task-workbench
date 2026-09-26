@@ -24,6 +24,10 @@ export interface RunnerDeps {
   /** 单轮模型响应允许执行的工具调用数量上限（超限调用不执行，记为失败结果回传） */
   maxToolCallsPerTurn: number;
   stepTimeoutMs: number;
+  // P5 额度与限额：创建 / 重试入口的路由层校验使用（运行器本身不消费）
+  maxUserConcurrentTasks: number;
+  userCreateRatePerMinute: number;
+  maxTaskBudgetCny: number;
 }
 
 /** 协作式取消的内部信号：工具执行中途被取消时跳过事件写入，由运行器统一转终态 */
