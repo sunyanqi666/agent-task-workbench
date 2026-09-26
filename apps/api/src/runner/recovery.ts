@@ -20,8 +20,7 @@ export function recoverInterruptedTasks(deps: RunnerDeps): RecoveryResult {
   const result: RecoveryResult = { resumed: [], interrupted: [] };
   for (const { id, status } of listUnfinishedTasks(deps.db)) {
     if (status === 'running') {
-      transitionInterrupted(deps, id);
-      result.interrupted.push(id);
+      if (markInterrupted(deps, id)) result.interrupted.push(id);
       continue;
     }
     void runTask(deps, id); // 异步恢复执行，不阻塞启动
@@ -30,14 +29,16 @@ export function recoverInterruptedTasks(deps: RunnerDeps): RecoveryResult {
   return result;
 }
 
-function transitionInterrupted(deps: RunnerDeps, taskId: string): void {
+/** 单项落终态失败（如并发下已被其他路径处理）返回 false，结果与日志不高报 */
+function markInterrupted(deps: RunnerDeps, taskId: string): boolean {
   try {
     transitionTask(deps.db, taskId, {
       to: 'failed',
       errorCode: 'interrupted',
       message: '服务重启导致执行中断，任务未完成（可重试）',
     });
+    return true;
   } catch {
-    // 单个任务恢复失败不阻断启动（如并发下已被其他路径落终态）
+    return false;
   }
 }
