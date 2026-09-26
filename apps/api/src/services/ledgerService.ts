@@ -281,33 +281,35 @@ export function getRefundedCny(db: DatabaseSync, userId: string, paymentId: stri
   return Math.round(total * 1e6) / 1e6;
 }
 
-/** 是否已记录完全相同的退款通知（同 paymentId 同金额）—— 重放幂等判定，先于累计校验 */
+/** 是否已记录过该退款单（同 paymentId 同 refundId）—— 重放幂等判定，先于累计校验 */
 export function hasRefundEntry(
   db: DatabaseSync,
   userId: string,
   paymentId: string,
-  amountCny: number,
+  refundId: string,
 ): boolean {
   return (
     queryOne<{ id: string }>(
       db,
       'SELECT id FROM ledger_entries WHERE biz_key = ? AND user_id = ?',
-      `refund:${paymentId}:${amountCny.toFixed(2)}`,
+      `refund:${paymentId}:${refundId}`,
       userId,
     ) !== undefined
   );
 }
 
 /**
- * 退款出账（分笔支持）：biz_key = refund:{paymentId}:{amount}，
- * 同一通知（同 paymentId 同金额）重放幂等；累计退款不得超过原充值（调用方校验）。
- * 返回是否发生了记账。
+ * 退款出账（分笔支持）：biz_key = refund:{paymentId}:{refundId}，
+ * refundId 为退款单号（真实支付场景由服务商下发，如微信支付 out_refund_no）——
+ * 同一退款单重放幂等；分笔退相同金额是不同 refundId，不会误判为重放；
+ * 累计退款不得超过原充值（调用方校验）。返回是否发生了记账。
  */
 export function recordRefund(
   db: DatabaseSync,
   userId: string,
   amountCny: number,
   paymentId: string,
+  refundId: string,
   memo?: string,
 ): boolean {
   return insertEntry(db, {
@@ -316,41 +318,54 @@ export function recordRefund(
     taskId: null,
     amountCny: -amountCny,
     priceVersion: null,
-    bizKey: `refund:${paymentId}:${amountCny.toFixed(2)}`,
-    memo: memo ?? '退款出账',
+    bizKey: `refund:${paymentId}:${refundId}`,
+    memo: memo ?? `退款出账（原充值 ${paymentId}，退款单 ${refundId}）`,
   });
 }
 
 // ===== 运营保护 =====
 
-/** 平台当日净流出（元）：reserve + actual 合计（结算释放的 settle 与入账不冲减当日流出） */
-export function getPlatformOutflowTodayCny(db: DatabaseSync): number {
+/**
+ * 平台风险敞口（元）= 当日实际消耗（Σactual）+ 当前仍未释放的预留（Σreserve − Σsettle，不限创建日期）。
+ * 口径说明（预留制）：reserve 是占用、settle 是释放、actual 才是真实成本——
+ * 已终态任务的预留不计入支出（完成任务的当日成本只有 actual），进行中任务的预留
+ * 在占用期间持续计入敞口（跨日任务不因日期切换漏算）。全部基于账本条目，与余额同源。
+ */
+export function getPlatformExposureCny(db: DatabaseSync): number {
   const start = new Date();
   start.setHours(0, 0, 0, 0);
-  const { total } = queryOne<{ total: number }>(
+  const { actual } = queryOne<{ actual: number }>(
     db,
-    "SELECT COALESCE(SUM(-amount_cny), 0) AS total FROM ledger_entries WHERE kind IN ('reserve', 'actual') AND created_at >= ?",
+    "SELECT COALESCE(SUM(-amount_cny), 0) AS actual FROM ledger_entries WHERE kind = 'actual' AND created_at >= ?",
     start.toISOString(),
   )!;
-  return Math.round(total * 1e6) / 1e6;
+  const { occupied } = queryOne<{ occupied: number }>(
+    db,
+    "SELECT COALESCE(SUM(-amount_cny), 0) AS occupied FROM ledger_entries WHERE kind = 'reserve'",
+  )!;
+  const { released } = queryOne<{ released: number }>(
+    db,
+    "SELECT COALESCE(SUM(amount_cny), 0) AS released FROM ledger_entries WHERE kind = 'settle'",
+  )!;
+  return Math.round((actual + occupied - released) * 1e6) / 1e6;
 }
 
 /**
- * 平台总预算告警（P5 运营保护）：当日平台净流出超过阈值时打告警日志。
+ * 平台总预算告警（P5 运营保护）：平台风险敞口超过阈值时打告警日志。
  * 阈值 <= 0 表示关闭告警。仅告警不阻断 —— 阻断由单任务预算与用户限额负责。
  */
 export function warnIfPlatformBudgetExceeded(db: DatabaseSync, dailyBudgetCny: number): void {
   if (dailyBudgetCny <= 0) return;
-  const outflow = getPlatformOutflowTodayCny(db);
-  if (outflow > dailyBudgetCny) {
+  const exposure = getPlatformExposureCny(db);
+  if (exposure > dailyBudgetCny) {
     console.warn(
-      `[ledger] 平台当日支出 ${outflow.toFixed(2)} 元已超过预算告警阈值 ${dailyBudgetCny.toFixed(2)} 元，请关注对账`,
+      `[ledger] 平台支出敞口 ${exposure.toFixed(2)} 元已超过预算告警阈值 ${dailyBudgetCny.toFixed(2)} 元，请关注对账`,
     );
   }
 }
 
 /**
- * 平台费用硬上限（账本可靠性加固）：当日净流出 + 本次预估超过硬上限时，
+ * 平台费用硬上限（账本可靠性加固）：平台风险敞口 + 本次预估超过硬上限时，
  * 拒绝创建/重试 live 任务（429）。硬上限为平台级兜底，优先级高于用户限额；
  * <= 0 表示关闭（测试环境默认关闭）。
  */
@@ -360,10 +375,10 @@ export function assertPlatformDailyBudget(
   additionalCny: number,
 ): void {
   if (hardLimitCny <= 0) return;
-  const outflow = getPlatformOutflowTodayCny(db);
-  if (outflow + additionalCny > hardLimitCny) {
+  const exposure = getPlatformExposureCny(db);
+  if (exposure + additionalCny > hardLimitCny) {
     throw new QuotaExceededError(
-      `平台当日支出 ${outflow.toFixed(2)} 元，加上本次预估 ${additionalCny.toFixed(2)} 元将超过硬上限 ${hardLimitCny.toFixed(2)} 元，请明日再试`,
+      `平台支出敞口 ${exposure.toFixed(2)} 元，加上本次预估 ${additionalCny.toFixed(2)} 元将超过硬上限 ${hardLimitCny.toFixed(2)} 元，请明日再试`,
       'platform_daily_budget_exceeded',
     );
   }

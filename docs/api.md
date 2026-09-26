@@ -135,7 +135,7 @@ curl -b jar.txt -X POST http://localhost:3000/api/v1/payments/refund \
 - 余额校验：live 预估费用上限超过当前余额 → 402 `insufficient_balance`；
 - 单任务预算：预估上限超过 `MAX_TASK_BUDGET_CNY`（默认 10 元）→ 400；
 - 并发与频控：进行中任务数超 `MAX_USER_CONCURRENT_TASKS`、创建频率超 `USER_CREATE_RATE_PER_MINUTE` → 429；
-- 平台硬上限：当日净流出（reserve+actual）+ 本次预估超过 `PLATFORM_DAILY_HARD_LIMIT_CNY`（默认 200 元；≤0 关闭）→ 429 `platform_daily_budget_exceeded`，平台级兜底，优先级高于用户限额；
+- 平台硬上限：平台支出敞口（当日 Σactual 实际消耗 + 当前未释放的预留占用，不限创建日期；已终态任务的预留不计入）+ 本次预估超过 `PLATFORM_DAILY_HARD_LIMIT_CNY`（默认 200 元；≤0 关闭）→ 429 `platform_daily_budget_exceeded`，平台级兜底，优先级高于用户限额；
 - 限额对 demo 模式不生效（不计费）。
 
 **用量账本（`ledger_entries`，唯一读写入口 `ledgerService`）**：
@@ -157,10 +157,10 @@ curl -b jar.txt -X POST http://localhost:3000/api/v1/payments/refund \
 
 - 默认关闭（防误用）：仅 `ENABLE_MOCK_PAYMENTS=true` 时开放，否则 403 `mock_payments_disabled`；生产环境严禁开启。
 - `POST /api/v1/payments/mock-topup`：模拟「服务端验证后的支付成功回调」，`paymentId` 幂等——重复回调返回 `{ recorded: false }` 不重复入账；金额必须为正数（分精度，四舍五入到分）、单笔 ≤ 10000 元，非法金额 400 不入账（失败路径演练）。
-- `POST /api/v1/payments/refund`：必须引用本用户的一笔充值（否则 404）；分笔退款累计不得超过原充值（400 `refund_exceeds_topup`）；同一通知重放（同 `paymentId` 同金额）幂等跳过。
+- `POST /api/v1/payments/refund`：请求体 `{ paymentId, refundId, amountCny }`（三者必填）。必须引用本用户的一笔充值（否则 404）；分笔退款累计不得超过原充值（400 `refund_exceeds_topup`）；幂等键 = `refund:{paymentId}:{refundId}`（refundId 为退款单号，真实支付由服务商下发，如微信支付 `out_refund_no`）——同一退款单重放幂等跳过，分笔退相同金额是不同 refundId，不会误判为重放。
 - 真实支付接入时，把 mock 回调替换为带签名验证的服务端对服务端回调即可，入账语义（biz_key 幂等）不变。
 
-**运营保护**：工具白名单与 `MAX_STEPS` / `MAX_TOOL_CALLS_PER_TURN` / `STEP_TIMEOUT_MS`（P1-P3）+ 单任务预算与用户限额（P5）+ 平台日预算告警 `PLATFORM_DAILY_BUDGET_CNY`（默认 50 元；当日 reserve+actual 净流出超阈值仅告警不阻断）+ 平台费用硬上限 `PLATFORM_DAILY_HARD_LIMIT_CNY`（默认 200 元；超限拒绝创建/重试 live 任务 429）+ 会话安全（`NODE_ENV=production` 时 Cookie 追加 Secure）+ 对账测试（预留/扣费/释放/充值/退款在测试中逐笔核对，中断/重试/重复回调后余额与账本恒等）。前端创建 live 任务时展示预估费用上限、当前余额与「模型供应商将处理任务内容」提示。
+**运营保护**：工具白名单与 `MAX_STEPS` / `MAX_TOOL_CALLS_PER_TURN` / `STEP_TIMEOUT_MS`（P1-P3）+ 单任务预算与用户限额（P5）+ 平台支出敞口告警 `PLATFORM_DAILY_BUDGET_CNY`（默认 50 元；敞口 = 当日 Σactual + 未释放预留占用，超阈值仅告警不阻断）+ 平台费用硬上限 `PLATFORM_DAILY_HARD_LIMIT_CNY`（默认 200 元；敞口 + 本次预估超限拒绝创建/重试 live 任务 429）+ 会话安全（`NODE_ENV=production` 时 Cookie 追加 Secure）+ 对账测试（预留/扣费/释放/充值/退款在测试中逐笔核对，中断/重试/重复回调后余额与账本恒等）。前端创建 live 任务时展示预估费用上限、当前余额与「模型供应商将处理任务内容」提示。
 
 ### 启动恢复（P4）
 

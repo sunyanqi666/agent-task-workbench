@@ -9,7 +9,9 @@ import {
   getBalanceCny,
   getEntriesByTask,
   getEntriesByUser,
+  getPlatformExposureCny,
   recordTopup,
+  recordActualUsage,
   reserveForTask,
   settleTask,
   warnIfPlatformBudgetExceeded,
@@ -216,6 +218,56 @@ test('充值幂等：同一 paymentId 重复入账只记一次', async (t) => {
   assert.equal(recordTopup(db, userId, 10, 'pay_dup'), true);
   assert.equal(recordTopup(db, userId, 10, 'pay_dup'), false, '重复回调不重复入账');
   assert.equal(getBalanceCny(db, userId), 10);
+});
+
+test('平台敞口口径：终态任务只计 actual；进行中任务计预留占用；跨日任务不重复计入', async (t) => {
+  const { app, db, cleanup } = await makeApp();
+  t.after(cleanup);
+  const { userId } = await register(app, 'ledger_exposure');
+  recordTopup(db, userId, 5, 'pay_exp');
+  const reserve = estimateTaskBudgetCny('deepseek-flash', 20)!; // 0.48
+
+  // 进行中：敞口 = 占用（预留未释放）
+  const t1 = createTask(db, {
+    prompt: '占用',
+    mode: 'live',
+    modelId: 'deepseek-flash',
+    userId,
+    priceVersion: MODEL_PRICE_VERSION,
+    reserveCny: reserve,
+  });
+  assert.equal(getPlatformExposureCny(db), 0.48, '进行中任务按预留占用计入');
+
+  // 取消（无 actual）：预留释放，敞口归零（旧口径会把 reserve 算成支出不冲减）
+  transitionTask(db, t1.id, { to: 'canceled' });
+  assert.equal(getPlatformExposureCny(db), 0, '终态任务预留释放后不计入敞口');
+
+  // 跨日：把 t2 的预留条目挪到昨天 → 今天敞口只含今天的 actual 与仍在占用的预留
+  const t2 = createTask(db, {
+    prompt: '跨日',
+    mode: 'live',
+    modelId: 'deepseek-flash',
+    userId,
+    priceVersion: MODEL_PRICE_VERSION,
+    reserveCny: reserve,
+  });
+  const yesterday = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+  db.prepare("UPDATE ledger_entries SET created_at = ? WHERE kind = 'reserve' AND task_id = ?").run(
+    yesterday,
+    t2.id,
+  );
+  assert.equal(getPlatformExposureCny(db), 0.48, '预留占用不限创建日期，今天仍计入');
+
+  // 完成后（失败，actual 兜底 0.024）：敞口 = 当日 actual（预留已释放，昨日占用今日不残留）
+  transitionTask(db, t2.id, { to: 'running' });
+  recordActualUsage(
+    db,
+    { taskId: t2.id, userId, modelId: 'deepseek-flash', priceVersion: MODEL_PRICE_VERSION },
+    0,
+    null, // 用量缺失 → 每步估算兜底 0.024
+  );
+  transitionTask(db, t2.id, { to: 'failed', errorCode: 'model_error', message: 'x' });
+  assert.equal(getPlatformExposureCny(db), 0.024, '终态后敞口 = 当日实际消耗');
 });
 
 test('平台日预算告警：当日净流出超阈值触发 console.warn（仅告警不阻断）', async (t) => {

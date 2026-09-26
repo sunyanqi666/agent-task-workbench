@@ -96,11 +96,11 @@ test('退款：分笔累计不超原充值；重放幂等；超退 400；未知 
     headers: { cookie },
   });
 
-  // 分笔退款 4 + 6 = 全额
+  // 分笔退款 4 + 6 = 全额（不同退款单号）
   const partial = await app.inject({
     method: 'POST',
     url: '/api/v1/payments/refund',
-    payload: { paymentId: 'ch_ref', amountCny: 4 },
+    payload: { paymentId: 'ch_ref', refundId: 're_001', amountCny: 4 },
     headers: { cookie },
   });
   assert.equal(partial.json().recorded, true);
@@ -109,17 +109,17 @@ test('退款：分笔累计不超原充值；重放幂等；超退 400；未知 
   const rest = await app.inject({
     method: 'POST',
     url: '/api/v1/payments/refund',
-    payload: { paymentId: 'ch_ref', amountCny: 6 },
+    payload: { paymentId: 'ch_ref', refundId: 're_002', amountCny: 6 },
     headers: { cookie },
   });
   assert.equal(rest.json().recorded, true);
   assert.equal(rest.json().balanceCny, 0);
 
-  // 同一通知重放（同 paymentId 同金额 4）幂等跳过，不再出账
+  // 同一退款单重放（同 paymentId 同 refundId）幂等跳过，不再出账
   const replay = await app.inject({
     method: 'POST',
     url: '/api/v1/payments/refund',
-    payload: { paymentId: 'ch_ref', amountCny: 4 },
+    payload: { paymentId: 'ch_ref', refundId: 're_001', amountCny: 4 },
     headers: { cookie },
   });
   assert.equal(replay.json().recorded, false);
@@ -135,14 +135,14 @@ test('退款：分笔累计不超原充值；重放幂等；超退 400；未知 
   const first = await app.inject({
     method: 'POST',
     url: '/api/v1/payments/refund',
-    payload: { paymentId: 'ch_small', amountCny: 1 },
+    payload: { paymentId: 'ch_small', refundId: 're_101', amountCny: 1 },
     headers: { cookie },
   });
   assert.equal(first.json().recorded, true);
   const over = await app.inject({
     method: 'POST',
     url: '/api/v1/payments/refund',
-    payload: { paymentId: 'ch_small', amountCny: 2 },
+    payload: { paymentId: 'ch_small', refundId: 're_102', amountCny: 2 },
     headers: { cookie },
   });
   assert.equal(over.statusCode, 400);
@@ -152,7 +152,7 @@ test('退款：分笔累计不超原充值；重放幂等；超退 400；未知 
   const unknown = await app.inject({
     method: 'POST',
     url: '/api/v1/payments/refund',
-    payload: { paymentId: 'ch_missing', amountCny: 1 },
+    payload: { paymentId: 'ch_missing', refundId: 're_201', amountCny: 1 },
     headers: { cookie },
   });
   assert.equal(unknown.statusCode, 404);
@@ -161,12 +161,52 @@ test('退款：分笔累计不超原充值；重放幂等；超退 400；未知 
   const anon = await app.inject({
     method: 'POST',
     url: '/api/v1/payments/refund',
-    payload: { paymentId: 'ch_ref', amountCny: 1 },
+    payload: { paymentId: 'ch_ref', refundId: 're_301', amountCny: 1 },
   });
   assert.equal(anon.statusCode, 401);
+
+  // 缺 refundId 400
+  const noId = await app.inject({
+    method: 'POST',
+    url: '/api/v1/payments/refund',
+    payload: { paymentId: 'ch_small', amountCny: 1 },
+    headers: { cookie },
+  });
+  assert.equal(noId.statusCode, 400);
 
   // 对账：入账 10 + 2，出账 4 + 6 + 1 → 余额 1
   assert.equal(getBalanceCny(db, userId), 1);
   const kinds = getEntriesByUser(db, userId).map((e) => e.kind);
   assert.deepEqual(kinds, ['topup', 'refund', 'refund', 'topup', 'refund']);
+});
+
+test('退款幂等键：同一充值分两次退相同金额（不同 refundId）均入账，不误判为重放', async (t) => {
+  const { app, db, cleanup } = await makeApp();
+  t.after(cleanup);
+  const { cookie, userId } = await register(app, 'pay_refund_id');
+  await app.inject({
+    method: 'POST',
+    url: '/api/v1/payments/mock-topup',
+    payload: { paymentId: 'ch_same', amountCny: 10 },
+    headers: { cookie },
+  });
+
+  // 旧实现 biz_key = refund:{paymentId}:{amount}，第二笔会被误判为重放
+  for (const refundId of ['re_a', 're_b']) {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/payments/refund',
+      payload: { paymentId: 'ch_same', refundId, amountCny: 3 },
+      headers: { cookie },
+    });
+    assert.equal(res.json().recorded, true, `退款单 ${refundId} 应入账`);
+  }
+  assert.equal(getBalanceCny(db, userId), 4, '两笔同金额退款均生效（10 - 3 - 3）');
+
+  const refunds = getEntriesByUser(db, userId).filter((e) => e.kind === 'refund');
+  assert.equal(refunds.length, 2);
+  assert.deepEqual(
+    refunds.map((e) => e.bizKey).sort(),
+    ['refund:ch_same:re_a', 'refund:ch_same:re_b'],
+  );
 });

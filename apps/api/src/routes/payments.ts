@@ -21,7 +21,7 @@ import { AppError, NotFoundError, UnauthorizedError, ValidationError } from '../
 
 /** 单笔支付金额上限（元）：测试环境的合理边界 */
 const MAX_PAYMENT_CNY = 10_000;
-/** paymentId 长度上限 */
+/** paymentId / refundId 长度上限 */
 const MAX_PAYMENT_ID_LENGTH = 128;
 
 function parseAmountCny(raw: unknown): number {
@@ -34,17 +34,18 @@ function parseAmountCny(raw: unknown): number {
   return rounded;
 }
 
-function parsePaymentId(raw: unknown): string {
-  if (typeof raw !== 'string' || !raw.trim()) throw new ValidationError('paymentId 不能为空');
+function parsePaymentId(raw: unknown, field: 'paymentId' | 'refundId'): string {
+  if (typeof raw !== 'string' || !raw.trim()) throw new ValidationError(`${field} 不能为空`);
   const id = raw.trim();
   if (id.length > MAX_PAYMENT_ID_LENGTH) {
-    throw new ValidationError(`paymentId 最长 ${MAX_PAYMENT_ID_LENGTH} 字符`);
+    throw new ValidationError(`${field} 最长 ${MAX_PAYMENT_ID_LENGTH} 字符`);
   }
   return id;
 }
 
 interface PaymentBody {
   paymentId?: unknown;
+  refundId?: unknown;
   amountCny?: unknown;
 }
 
@@ -62,23 +63,25 @@ export function registerPaymentRoutes(app: FastifyInstance, db: DatabaseSync, en
     const user = getUserFromRequest(db, request);
     if (!user) throw new UnauthorizedError('充值需要登录');
     const body = (request.body ?? {}) as PaymentBody;
-    const paymentId = parsePaymentId(body.paymentId);
+    const paymentId = parsePaymentId(body.paymentId, 'paymentId');
     const amountCny = parseAmountCny(body.amountCny);
     const recorded = recordTopup(db, user.id, amountCny, paymentId);
     return { recorded, balanceCny: getBalanceCny(db, user.id) } satisfies PaymentResponse;
   });
 
   // 退款：必须引用本用户的一笔充值；分笔退款累计不得超过原充值；
-  // 同一通知重放（同 paymentId 同金额）幂等跳过（biz_key = refund:{paymentId}:{amount}）。
+  // 幂等键 = refund:{paymentId}:{refundId}，refundId 为退款单号（真实支付由服务商下发）：
+  // 同一退款单重放幂等跳过；分笔退相同金额是不同 refundId，不会误判为重放。
   app.post('/api/v1/payments/refund', async (request: FastifyRequest) => {
     guard();
     const user = getUserFromRequest(db, request);
     if (!user) throw new UnauthorizedError('退款需要登录');
     const body = (request.body ?? {}) as PaymentBody;
-    const paymentId = parsePaymentId(body.paymentId);
+    const paymentId = parsePaymentId(body.paymentId, 'paymentId');
+    const refundId = parsePaymentId(body.refundId, 'refundId');
     const amountCny = parseAmountCny(body.amountCny);
-    // 重放幂等先行：同一通知（同 paymentId 同金额）已入账过则直接跳过（累计校验可能已不通过）
-    if (hasRefundEntry(db, user.id, paymentId, amountCny)) {
+    // 重放幂等先行：同一退款单已入账过则直接跳过（累计校验可能已不通过）
+    if (hasRefundEntry(db, user.id, paymentId, refundId)) {
       return { recorded: false, balanceCny: getBalanceCny(db, user.id) } satisfies PaymentResponse;
     }
     const topupCny = getTopupCny(db, user.id, paymentId);
@@ -93,7 +96,7 @@ export function registerPaymentRoutes(app: FastifyInstance, db: DatabaseSync, en
         'refund_exceeds_topup',
       );
     }
-    const recorded = recordRefund(db, user.id, amountCny, paymentId);
+    const recorded = recordRefund(db, user.id, amountCny, paymentId, refundId);
     return { recorded, balanceCny: getBalanceCny(db, user.id) } satisfies PaymentResponse;
   });
 }
