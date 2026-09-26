@@ -24,6 +24,7 @@ import { publishTaskEvent } from './eventBus';
 
 interface TaskRow {
   id: string;
+  user_id: string | null;
   prompt: string;
   status: TaskStatus;
   mode: ModelMode;
@@ -50,6 +51,7 @@ interface EventRow {
 function rowToTask(row: TaskRow): Task {
   return {
     id: row.id,
+    userId: row.user_id,
     prompt: row.prompt,
     status: row.status,
     mode: row.mode,
@@ -190,22 +192,60 @@ export function getTask(db: DatabaseSync, taskId: string): Task {
   return rowToTask(row);
 }
 
+/**
+ * 归属校验的读取：任务不存在或不属于该用户一律 404（不向非归属者泄露任务存在性）。
+ * userId 为 null 表示匿名访问者——只能命中 user_id IS NULL 的匿名任务。
+ */
+export function getOwnedTask(db: DatabaseSync, taskId: string, userId: string | null): Task {
+  const row =
+    userId === null
+      ? queryOne<TaskRow>(db, 'SELECT * FROM tasks WHERE id = ? AND user_id IS NULL', taskId)
+      : queryOne<TaskRow>(db, 'SELECT * FROM tasks WHERE id = ? AND user_id = ?', taskId, userId);
+  if (!row) throw new NotFoundError(`任务不存在：${taskId}`);
+  return rowToTask(row);
+}
+
+/** 归属校验的存在性检查（SSE 流等只需判断可访问性的场景） */
+export function taskOwnedBy(db: DatabaseSync, taskId: string, userId: string | null): boolean {
+  const row =
+    userId === null
+      ? queryOne<{ '1': number }>(
+          db,
+          'SELECT 1 FROM tasks WHERE id = ? AND user_id IS NULL',
+          taskId,
+        )
+      : queryOne<{ '1': number }>(
+          db,
+          'SELECT 1 FROM tasks WHERE id = ? AND user_id = ?',
+          taskId,
+          userId,
+        );
+  return row !== undefined;
+}
+
 export function taskExists(db: DatabaseSync, taskId: string): boolean {
   return queryOne<{ '1': number }>(db, 'SELECT 1 FROM tasks WHERE id = ?', taskId) !== undefined;
 }
 
-/** 按创建时间倒序分页；total 为任务总数 */
+/** 按创建时间倒序分页；仅返回该归属者（用户或匿名）可见的任务，total 同口径 */
 export function listTasks(
   db: DatabaseSync,
-  options: { limit: number; offset: number },
+  options: { limit: number; offset: number; userId: string | null },
 ): { items: Task[]; total: number } {
+  const where = options.userId === null ? 'user_id IS NULL' : 'user_id = ?';
+  const ownerParam = options.userId === null ? [] : [options.userId];
   const rows = queryAll<TaskRow>(
     db,
-    'SELECT * FROM tasks ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?',
+    `SELECT * FROM tasks WHERE ${where} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
+    ...ownerParam,
     options.limit,
     options.offset,
   );
-  const { total } = queryOne<{ total: number }>(db, 'SELECT COUNT(*) AS total FROM tasks')!;
+  const { total } = queryOne<{ total: number }>(
+    db,
+    `SELECT COUNT(*) AS total FROM tasks WHERE ${where}`,
+    ...ownerParam,
+  )!;
   return { items: rows.map(rowToTask), total };
 }
 
@@ -232,17 +272,21 @@ export function listUnfinishedTasks(
 
 // ===== 创建 =====
 
-/** 创建任务：插入 queued 任务 + task.created 事件，同一事务；parentTaskId 用于重试关联 */
-export function createTask(db: DatabaseSync, input: CreateTaskInput & { parentTaskId?: string }): Task {
+/** 创建任务：插入 queued 任务 + task.created 事件，同一事务；parentTaskId 用于重试关联，userId 为任务归属（null = 匿名） */
+export function createTask(
+  db: DatabaseSync,
+  input: CreateTaskInput & { parentTaskId?: string; userId?: string | null },
+): Task {
   const prompt = input.prompt.trim();
   const mode: ModelMode = input.mode ?? 'demo';
+  const userId = input.userId ?? null;
   const now = new Date().toISOString();
   const id = randomUUID();
 
   const event = transaction(db, () => {
     db.prepare(
-      'INSERT INTO tasks (id, prompt, status, mode, model_id, parent_task_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-    ).run(id, prompt, 'queued', mode, input.modelId ?? DEFAULT_MODEL_ID, input.parentTaskId ?? null, now, now);
+      'INSERT INTO tasks (id, user_id, prompt, status, mode, model_id, parent_task_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    ).run(id, userId, prompt, 'queued', mode, input.modelId ?? DEFAULT_MODEL_ID, input.parentTaskId ?? null, now, now);
     return insertEvent(db, id, 'task.created', { prompt });
   });
   publishTaskEvent(event);

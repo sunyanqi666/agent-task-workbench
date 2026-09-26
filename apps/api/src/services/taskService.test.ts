@@ -148,11 +148,11 @@ test('listTasks：按创建时间倒序 + 分页与 total', async (t) => {
     await new Promise((r) => setTimeout(r, 15));
   }
 
-  const page = listTasks(db, { limit: 2, offset: 0 });
+  const page = listTasks(db, { limit: 2, offset: 0, userId: null });
   assert.equal(page.total, 3);
   assert.deepEqual(page.items.map((task) => task.id), [ids[2], ids[1]]);
 
-  const rest = listTasks(db, { limit: 2, offset: 2 });
+  const rest = listTasks(db, { limit: 2, offset: 2, userId: null });
   assert.deepEqual(rest.items.map((task) => task.id), [ids[0]]);
 });
 

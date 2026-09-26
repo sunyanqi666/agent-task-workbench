@@ -31,3 +31,10 @@ export class ValidationError extends AppError {
     super(message, 400, 'bad_request');
   }
 }
+
+/** 未登录或凭证无效 → 401 */
+export class UnauthorizedError extends AppError {
+  constructor(message = '需要登录') {
+    super(message, 401, 'unauthorized');
+  }
+}

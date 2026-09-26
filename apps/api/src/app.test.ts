@@ -6,6 +6,15 @@ import { PROMPT_MAX_LENGTH } from 'contracts';
 import { queryAll } from './db';
 import { makeApp, waitForTerminal } from './testing';
 
+/** 从 Set-Cookie 响应头提取会话 Cookie（与 auth.test.ts 相同约定） */
+function extractSessionCookie(headers: Record<string, unknown>): string {
+  const raw = headers['set-cookie'];
+  const joined = Array.isArray(raw) ? raw.join('; ') : String(raw ?? '');
+  const match = /wb_session=[^;]+/.exec(joined);
+  assert.ok(match, `应设置会话 Cookie，实际：${joined}`);
+  return match[0];
+}
+
 test('健康检查返回预期结构，迁移在新数据库上成功执行', async (t) => {
   const { app, db, cleanup } = await makeApp();
   t.after(cleanup);
@@ -142,14 +151,31 @@ test('输入校验：空 / 超长 prompt 与非法 mode 返回 400', async (t) =
   await bad({ prompt: 'ok', mode: 'invalid' });
 });
 
-test('live 未配置真实模型：创建返回 503 与明确提示（而非假成功）', async (t) => {
+test('live 未配置真实模型：匿名创建 401，登录后创建 503 与明确提示（而非假成功）', async (t) => {
   const { app, cleanup } = await makeApp();
   t.after(cleanup);
 
+  // P5 归属规则：live 消耗平台额度，匿名一律 401（先于 503 能力检查）
+  const anon = await app.inject({
+    method: 'POST',
+    url: '/api/v1/tasks',
+    payload: { prompt: 'x', mode: 'live' },
+  });
+  assert.equal(anon.statusCode, 401);
+  assert.equal(anon.json().error.code, 'unauthorized');
+
+  // 登录用户在 live 未配置时得到 503 明确提示
+  const reg = await app.inject({
+    method: 'POST',
+    url: '/api/v1/auth/register',
+    payload: { username: 'live_user', password: 'password123' },
+  });
+  const cookie = extractSessionCookie(reg.headers);
   const res = await app.inject({
     method: 'POST',
     url: '/api/v1/tasks',
     payload: { prompt: 'x', mode: 'live' },
+    headers: { cookie },
   });
   assert.equal(res.statusCode, 503);
   assert.equal(res.json().error.code, 'live_model_not_configured');

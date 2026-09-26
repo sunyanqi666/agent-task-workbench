@@ -57,6 +57,8 @@ export interface TaskUsage {
 
 export interface Task {
   id: string;
+  /** 归属用户 id；null = 匿名任务（历史任务 / 未登录 demo 任务）。登录用户只见自己的任务 */
+  userId: string | null;
   /** 用户完整任务输入；非空且长度受限（服务端校验） */
   prompt: string;
   status: TaskStatus;
@@ -161,6 +163,33 @@ export interface HealthInfo {
   db: 'ok';
   version: string;
   uptimeSec: number;
+}
+
+// ===== 用户与认证（P5） =====
+/** 用户名规则：3..32 字符，字母数字下划线连字符 */
+export const USERNAME_PATTERN = /^[a-zA-Z0-9_-]{3,32}$/;
+/** 密码长度限制 */
+export const PASSWORD_MIN_LENGTH = 8;
+export const PASSWORD_MAX_LENGTH = 128;
+/** 会话有效期（秒）：30 天 */
+export const SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
+/** 会话 Cookie 名（HttpOnly，服务端 Session 表） */
+export const SESSION_COOKIE_NAME = 'wb_session';
+
+export interface UserInfo {
+  id: string;
+  username: string;
+  createdAt: string;
+}
+
+/** POST /api/v1/auth/register 与 /login 响应：注册/登录成功即建立会话（Set-Cookie） */
+export interface AuthResponse {
+  user: UserInfo;
+}
+
+/** GET /api/v1/auth/me 响应：未登录时 user 为 null */
+export interface MeResponse {
+  user: UserInfo | null;
 }
 
 // ===== 任务 API 契约（P1） =====

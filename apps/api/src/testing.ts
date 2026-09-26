@@ -45,10 +45,16 @@ export async function makeApp(
   };
 }
 
-/** 轮询任务直至终态 */
-export async function waitForTerminal(app: FastifyInstance, id: string, tries = 200): Promise<Task> {
+/** 轮询任务直至终态；headers 用于携带认证 Cookie（P5 归属后匿名读不到他人任务） */
+export async function waitForTerminal(
+  app: FastifyInstance,
+  id: string,
+  tries = 200,
+  init?: { headers?: Record<string, string> },
+): Promise<Task> {
   for (let i = 0; i < tries; i++) {
-    const res = await app.inject({ method: 'GET', url: `/api/v1/tasks/${id}` });
+    const res = await app.inject({ method: 'GET', url: `/api/v1/tasks/${id}`, ...init });
+    if (res.statusCode === 404) throw new Error(`任务 ${id} 不存在或无权访问（404）`);
     const task = res.json() as Task;
     if (['completed', 'failed', 'canceled'].includes(task.status)) return task;
     await new Promise((r) => setTimeout(r, 10));

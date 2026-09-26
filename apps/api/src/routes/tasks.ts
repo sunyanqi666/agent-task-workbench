@@ -1,15 +1,16 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { CreateTaskInput, TaskEvent, TaskEventType } from 'contracts';
 import { AVAILABLE_MODELS, PROMPT_MAX_LENGTH } from 'contracts';
-import { AppError, ConflictError, NotFoundError, ValidationError } from '../services/errors';
+import { AppError, ConflictError, NotFoundError, UnauthorizedError, ValidationError } from '../services/errors';
 import {
   createTask,
   getEvents,
-  getTask,
+  getOwnedTask,
   listTasks,
-  taskExists,
+  taskOwnedBy,
   transitionTask,
 } from '../services/taskService';
+import { getUserFromRequest } from '../services/authService';
 import { subscribeTaskEvents } from '../services/eventBus';
 import { getCancelController } from '../runner/cancelRegistry';
 import { runTask, type RunnerDeps } from '../runner/runTask';
@@ -17,6 +18,8 @@ import { runTask, type RunnerDeps } from '../runner/runTask';
 /**
  * 任务路由：只做输入校验与响应组装；状态与事务归任务服务，模型与工具循环归运行器。
  * 服务层抛出的 AppError 由 app.ts 的统一错误处理器转换为 ApiError 格式。
+ * 归属规则（P5）：登录用户只见/操作自己的任务，匿名只操作 user_id IS NULL 的任务；
+ * 不存在与无权访问一律 404，不泄露他人任务的存在性。
  */
 
 /** 解析 query 中的整数参数：缺省用默认值，越界或非整数返回 400 */
@@ -67,6 +70,11 @@ export function registerTaskRoutes(app: FastifyInstance, deps: RunnerDeps): void
   // 创建任务：201 返回 queued 快照，执行在后台异步进行（事件与状态随之持久化）
   app.post('/api/v1/tasks', async (request: FastifyRequest, reply: FastifyReply) => {
     const input = parseCreateInput(request.body);
+    const user = getUserFromRequest(deps.db, request);
+    if (input.mode === 'live' && !user) {
+      // live 消耗平台额度，仅登录用户可用；匿名仍可免费使用 demo
+      throw new UnauthorizedError('live 任务需要登录后使用平台额度，请先注册或登录');
+    }
     if (input.mode === 'live' && !deps.liveModel) {
       // live 依赖真实模型密钥；未配置返回 503 明确提示，不返回假成功
       throw new AppError(
@@ -75,26 +83,27 @@ export function registerTaskRoutes(app: FastifyInstance, deps: RunnerDeps): void
         'live_model_not_configured',
       );
     }
-    const task = createTask(deps.db, input);
+    const task = createTask(deps.db, { ...input, userId: user?.id ?? null });
     void runTask(deps, task.id); // 异步执行，不阻塞 201 响应
     reply.code(201);
     return task;
   });
 
-  // 任务列表：按创建时间倒序分页
+  // 任务列表：按创建时间倒序分页；只返回当前归属者可见的任务
   app.get('/api/v1/tasks', async (request: FastifyRequest) => {
+    const user = getUserFromRequest(deps.db, request);
     const query = request.query as Record<string, string | undefined>;
     const limit = parseIntParam(query.limit, 20, 1, 100, 'limit');
     const offset = parseIntParam(query.offset, 0, 0, 1_000_000, 'offset');
-    const { items, total } = listTasks(deps.db, { limit, offset });
+    const { items, total } = listTasks(deps.db, { limit, offset, userId: user?.id ?? null });
     return { items, total, limit, offset };
   });
 
-  // 任务快照
+  // 任务快照（归属校验：他人任务一律 404）
   app.get('/api/v1/tasks/:id', async (request: FastifyRequest) => {
     const { id } = request.params as { id: string };
-    if (!taskExists(deps.db, id)) throw new NotFoundError(`任务不存在：${id}`);
-    return getTask(deps.db, id);
+    const user = getUserFromRequest(deps.db, request);
+    return getOwnedTask(deps.db, id, user?.id ?? null);
   });
 
   // 持久化事件：afterSeq 增量拉取（回放与 P2 SSE 续接共用）
@@ -102,7 +111,8 @@ export function registerTaskRoutes(app: FastifyInstance, deps: RunnerDeps): void
     const { id } = request.params as { id: string };
     const query = request.query as Record<string, string | undefined>;
     const afterSeq = parseIntParam(query.afterSeq, 0, 0, 1_000_000, 'afterSeq');
-    if (!taskExists(deps.db, id)) throw new NotFoundError(`任务不存在：${id}`);
+    const user = getUserFromRequest(deps.db, request);
+    if (!taskOwnedBy(deps.db, id, user?.id ?? null)) throw new NotFoundError(`任务不存在：${id}`);
     return { events: getEvents(deps.db, id, afterSeq) };
   });
 
@@ -112,7 +122,8 @@ export function registerTaskRoutes(app: FastifyInstance, deps: RunnerDeps): void
     const { id } = request.params as { id: string };
     const query = request.query as Record<string, string | undefined>;
     const afterSeq = parseIntParam(query.afterSeq, 0, 0, 1_000_000, 'afterSeq');
-    if (!taskExists(deps.db, id)) throw new NotFoundError(`任务不存在：${id}`);
+    const user = getUserFromRequest(deps.db, request);
+    if (!taskOwnedBy(deps.db, id, user?.id ?? null)) throw new NotFoundError(`任务不存在：${id}`);
 
     const TERMINAL_EVENT_TYPES = new Set<TaskEventType>([
       'task.completed',
@@ -179,7 +190,7 @@ export function registerTaskRoutes(app: FastifyInstance, deps: RunnerDeps): void
     }
 
     // afterSeq 已覆盖全部事件（如客户端重连）时按快照判断是否终态
-    const snapshot = getTask(deps.db, id);
+    const snapshot = getOwnedTask(deps.db, id, user?.id ?? null);
     if (['completed', 'failed', 'canceled'].includes(snapshot.status)) {
       finish();
       return;
@@ -192,8 +203,8 @@ export function registerTaskRoutes(app: FastifyInstance, deps: RunnerDeps): void
   // 已取消幂等返回 200；completed / failed 返回 409。
   app.post('/api/v1/tasks/:id/cancel', async (request: FastifyRequest, reply: FastifyReply) => {
     const { id } = request.params as { id: string };
-    if (!taskExists(deps.db, id)) throw new NotFoundError(`任务不存在：${id}`);
-    const task = getTask(deps.db, id);
+    const user = getUserFromRequest(deps.db, request);
+    const task = getOwnedTask(deps.db, id, user?.id ?? null);
 
     if (task.status === 'canceled') return task; // 幂等：重复取消返回当前快照
     if (task.status === 'completed' || task.status === 'failed') {
@@ -216,8 +227,8 @@ export function registerTaskRoutes(app: FastifyInstance, deps: RunnerDeps): void
   // 重复重试会产生多个新任务，各自独立执行 —— 关联关系明确，不产生混乱记录。
   app.post('/api/v1/tasks/:id/retry', async (request: FastifyRequest, reply: FastifyReply) => {
     const { id } = request.params as { id: string };
-    if (!taskExists(deps.db, id)) throw new NotFoundError(`任务不存在：${id}`);
-    const task = getTask(deps.db, id);
+    const user = getUserFromRequest(deps.db, request);
+    const task = getOwnedTask(deps.db, id, user?.id ?? null);
 
     if (task.status !== 'failed' && task.status !== 'canceled') {
       throw new ConflictError(`仅失败或已取消的任务可重试（当前状态：${task.status}）`);
@@ -231,6 +242,7 @@ export function registerTaskRoutes(app: FastifyInstance, deps: RunnerDeps): void
       mode: task.mode,
       modelId: task.modelId, // 重试沿用原任务创建时固化的模型选择
       parentTaskId: task.id,
+      userId: task.userId, // 归属随原任务（请求者必为归属者，见上方归属校验）
     });
     void runTask(deps, retry.id);
     reply.code(201);

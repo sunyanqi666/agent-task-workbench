@@ -10,6 +10,7 @@ import type { AppConfig } from './config';
 import { registerHealthRoutes } from './routes/health';
 import { registerModelRoutes } from './routes/models';
 import { registerTaskRoutes } from './routes/tasks';
+import { registerAuthRoutes } from './routes/auth';
 import { createDefaultToolRegistry } from './tools';
 import { DemoModel } from './runner/model';
 import { LiveModel } from './runner/liveModel';
@@ -72,6 +73,7 @@ export async function buildServer(
 
   registerHealthRoutes(app, db);
   registerModelRoutes(app);
+  registerAuthRoutes(app, db);
   registerTaskRoutes(app, runner);
 
   app.setNotFoundHandler((request, reply) => {
